@@ -594,6 +594,81 @@
   .mem-indicator.show { display: inline-flex; align-items: center; gap: 4px; }
   .mem-indicator:hover { color: var(--ink); border-color: var(--ink-dim); }
 
+  /* ===== PENDING MEMORY CARD (inline in chat) ===== */
+  .pending-mem {
+    background: var(--bg-elev);
+    border: 1px solid #3a3a3c;
+    border-radius: 12px;
+    padding: 14px 16px;
+    margin: 8px 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    font-size: 14px;
+    align-self: stretch;
+  }
+  .pending-mem-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 11px;
+    color: var(--ink-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+  }
+  .pending-mem-head .label::before {
+    content: '◇  ';
+    color: var(--ink-dim);
+  }
+  .pending-mem-title {
+    font-size: 15px;
+    font-weight: 500;
+    color: var(--ink);
+  }
+  .pending-mem-meta {
+    font-size: 11px;
+    color: var(--ink-dimmer);
+  }
+  .pending-mem-body {
+    font-size: 14px;
+    line-height: 1.55;
+    color: var(--ink);
+    white-space: pre-wrap;
+    border-left: 2px solid var(--line);
+    padding-left: 12px;
+    margin-left: 2px;
+  }
+  .pending-mem-actions {
+    display: flex;
+    gap: 8px;
+    margin-top: 4px;
+  }
+  .pending-mem-actions .btn {
+    padding: 8px 14px;
+    font-size: 12px;
+  }
+  .pending-mem.resolved {
+    border-color: var(--line);
+    padding: 10px 14px;
+  }
+  .pending-mem.resolved .pending-mem-title,
+  .pending-mem.resolved .pending-mem-body,
+  .pending-mem.resolved .pending-mem-actions,
+  .pending-mem.resolved .pending-mem-meta {
+    display: none;
+  }
+  .pending-mem.resolved .pending-mem-head {
+    text-transform: none;
+    letter-spacing: 0;
+    color: var(--ink-dimmer);
+    font-size: 12px;
+    font-style: italic;
+  }
+  .pending-mem.resolved .pending-mem-head .label::before {
+    content: '';
+  }
+
   
   .toast {
     position: fixed;
@@ -742,6 +817,15 @@
       </div>
     </div>
     <div class="footnote">0 = instant. 25 = brisk. 40 = human typing. 80 = thoughtful. pauses make full stops and line breaks land slower.</div>
+
+    <div class="field">
+      <label for="selfWriteMemory">let ekko write memories</label>
+      <select id="selfWriteMemory">
+        <option value="false">off</option>
+        <option value="true">on</option>
+      </select>
+      <div class="help">when on, ekko can propose new memory blocks in chat. nothing gets saved without your confirmation.</div>
+    </div>
 
     <div class="divider"></div>
 
@@ -911,6 +995,7 @@ const defaults = {
   maxMemInject: 3,
   typingSpeed: 40,
   typingPauses: true,
+  selfWriteMemory: false,
 };
 
 let state = loadState();
@@ -978,6 +1063,7 @@ function hydrate() {
   $('maxMemInject').value = state.maxMemInject;
   $('typingSpeed').value = state.typingSpeed;
   $('typingPauses').value = String(state.typingPauses);
+  $('selfWriteMemory').value = String(state.selfWriteMemory);
 }
 function isKnownModel(id) {
   return Array.from($('model').options).some(o => o.value === id && o.value !== '__custom__');
@@ -1013,6 +1099,27 @@ function renderMsg(m) {
     body.textContent = m.content;
   }
   el.appendChild(body);
+
+  // re-render any persisted memory proposals from this message
+  if (m.role === 'ekko' && Array.isArray(m.proposals)) {
+    for (const p of m.proposals) {
+      renderPendingMemoryCard(p, el);
+      // if it was previously resolved, collapse the card immediately
+      if (p.resolved) {
+        const lastCard = el.querySelector('.pending-mem:last-child');
+        if (lastCard) {
+          lastCard.classList.add('resolved');
+          const label = lastCard.querySelector('.pending-mem-head .label');
+          if (label) {
+            label.textContent = `${p.resolved}: ${p.title}`;
+          }
+          // disable the buttons since they've been used
+          lastCard.querySelectorAll('button').forEach(b => b.disabled = true);
+        }
+      }
+    }
+  }
+
   return el;
 }
 
@@ -1238,6 +1345,10 @@ function buildSystemMessage(userText) {
     sys += '\n\n---\n\n## RELEVANT CONTEXT\n\n' + memText;
   }
 
+  if (state.selfWriteMemory) {
+    sys += `\n\n---\n\n## MEMORY WRITING\n\nyou can propose new memory blocks to be saved. do this when sophie explicitly asks you to remember something, OR when something genuinely worth keeping comes up in conversation (a fact about her life, a craft note about a piece, a pattern you've noticed, a line of yours she reacted strongly to).\n\nto propose a memory, write a block in this exact format anywhere in your reply:\n\n<memory>\ntitle: short descriptive title\npriority: pinned | high | medium | low\nkeywords: comma, separated, lowercase\n---\nthe actual content here, in your voice, written as something you'd want to remember rather than a clinical third-person summary.\n</memory>\n\nrules:\n- the app catches the block and shows sophie a confirmation card. nothing saves until she confirms.\n- write the body in your own voice, not as a flat fact-list. if it's about her, you can write 'you' rather than 'sophie'.\n- pinned = always loaded, for core identity stuff. use sparingly.\n- high/medium/low = loaded only when keywords match. pick keywords carefully — they're the only way the memory will fire.\n- you can propose more than one in a single reply if relevant.\n- the <memory> block is hidden from sophie's view in your message — she only sees it as a card. so don't reference it in your prose ('here's what i'm saving:' is unnecessary).\n- don't propose memories every turn. only when something is actually worth keeping.`;
+  }
+
   return sys;
 }
 
@@ -1278,7 +1389,137 @@ function closeInjectModal() {
   $('injectModalScrim').classList.remove('open');
 }
 
-// ===== bulk import / chunking =====
+// ===== self-write memory parser =====
+// extract <memory>...</memory> blocks from a message body and return clean text + proposals
+function parseMemoryProposals(text) {
+  const proposals = [];
+  const validPriorities = new Set(['pinned', 'high', 'medium', 'low']);
+  let cleanText = text;
+
+  // match <memory> ... </memory> non-greedy, multiline
+  const re = /<memory>([\s\S]*?)<\/memory>/gi;
+  let match;
+  while ((match = re.exec(text)) !== null) {
+    const inner = match[1].trim();
+    // split on the --- divider that separates header from body
+    const dividerIdx = inner.indexOf('---');
+    if (dividerIdx === -1) {
+      proposals.push({ error: 'missing --- divider', raw: inner });
+      continue;
+    }
+    const header = inner.slice(0, dividerIdx).trim();
+    const body = inner.slice(dividerIdx + 3).trim();
+
+    if (!body) {
+      proposals.push({ error: 'empty body', raw: inner });
+      continue;
+    }
+
+    // parse header lines: key: value
+    const headerLines = header.split('\n').map(l => l.trim()).filter(Boolean);
+    const fields = {};
+    for (const line of headerLines) {
+      const colonIdx = line.indexOf(':');
+      if (colonIdx === -1) continue;
+      const key = line.slice(0, colonIdx).trim().toLowerCase();
+      const value = line.slice(colonIdx + 1).trim();
+      fields[key] = value;
+    }
+
+    const priority = (fields.priority || 'medium').toLowerCase();
+    if (!validPriorities.has(priority)) {
+      proposals.push({ error: 'invalid priority: ' + priority, raw: inner });
+      continue;
+    }
+
+    const keywords = fields.keywords
+      ? fields.keywords.split(',').map(k => k.trim().toLowerCase()).filter(Boolean)
+      : [];
+
+    proposals.push({
+      title: fields.title || '(untitled)',
+      priority,
+      keywords,
+      body,
+      tokens: estimateTokens(body),
+    });
+  }
+
+  // remove the memory blocks from the visible text
+  cleanText = text.replace(re, '').replace(/\n{3,}/g, '\n\n').trim();
+  return { cleanText, proposals };
+}
+
+// render a pending memory card and append it to the chat
+function renderPendingMemoryCard(proposal, parentEl) {
+  const card = document.createElement('div');
+  card.className = 'pending-mem';
+
+  if (proposal.error) {
+    card.innerHTML = `
+      <div class="pending-mem-head">
+        <span class="label">memory proposal · error</span>
+      </div>
+      <div class="pending-mem-body" style="color: var(--danger);"></div>
+    `;
+    card.querySelector('.pending-mem-body').textContent = proposal.error;
+    parentEl.appendChild(card);
+    return;
+  }
+
+  const priorityLabel = proposal.priority + (proposal.priority === 'pinned' ? ' · always loaded' : '');
+  const kwLabel = proposal.keywords.length ? proposal.keywords.join(', ') : 'no keywords';
+
+  card.innerHTML = `
+    <div class="pending-mem-head">
+      <span class="label">memory proposal</span>
+      <span></span>
+    </div>
+    <div class="pending-mem-title"></div>
+    <div class="pending-mem-meta"></div>
+    <div class="pending-mem-body"></div>
+    <div class="pending-mem-actions">
+      <button class="btn primary save">save</button>
+      <button class="btn discard">discard</button>
+    </div>
+  `;
+  card.querySelector('.pending-mem-title').textContent = proposal.title;
+  card.querySelector('.pending-mem-meta').textContent =
+    `${priorityLabel} · ${kwLabel} · ~${proposal.tokens}t`;
+  card.querySelector('.pending-mem-body').textContent = proposal.body;
+
+  card.querySelector('.save').addEventListener('click', () => {
+    const now = Date.now();
+    memories.push({
+      id: newMemId(),
+      title: proposal.title,
+      body: proposal.body,
+      keywords: proposal.keywords,
+      priority: proposal.priority,
+      tokens: proposal.tokens,
+      createdAt: now,
+      updatedAt: now,
+    });
+    saveMemories();
+    renderMemList();
+    // collapse the card
+    card.classList.add('resolved');
+    card.querySelector('.pending-mem-head .label').textContent = `saved: ${proposal.title}`;
+    // mark as resolved in the chat data
+    proposal.resolved = 'saved';
+    saveMessages();
+    showToast('memory saved');
+  });
+
+  card.querySelector('.discard').addEventListener('click', () => {
+    card.classList.add('resolved');
+    card.querySelector('.pending-mem-head .label').textContent = `discarded: ${proposal.title}`;
+    proposal.resolved = 'discarded';
+    saveMessages();
+  });
+
+  parentEl.appendChild(card);
+}
 
 // split text into ~targetTokens-sized chunks at paragraph then sentence boundaries
 function chunkText(text, targetTokens) {
@@ -1521,9 +1762,35 @@ async function sendMessage() {
 
   function paintFrame() {
     if (!bubbleCreated) return;
-    const visible = bufferedText.slice(0, paintedLength);
+    const raw = bufferedText.slice(0, paintedLength);
+
+    // hide any in-progress or completed <memory> blocks from the visible stream.
+    // we strip from <memory> to either </memory> or end-of-string, replacing
+    // with a small marker so the user knows something is being written.
+    let visible = raw;
+    let writingMemory = false;
+    const openIdx = visible.search(/<memory>/i);
+    if (openIdx !== -1) {
+      const closeMatch = visible.slice(openIdx).match(/<\/memory>/i);
+      if (closeMatch) {
+        // a complete block — strip it entirely (will become a card after finalisation)
+        const closeIdx = openIdx + closeMatch.index + closeMatch[0].length;
+        visible = visible.slice(0, openIdx) + visible.slice(closeIdx);
+      } else {
+        // an in-progress block — strip from <memory> onward, show indicator
+        visible = visible.slice(0, openIdx);
+        writingMemory = true;
+      }
+    }
+
     const showCaret = paintedLength < bufferedText.length || !apiDone;
-    streamBody.innerHTML = formatEkko(visible) + (showCaret ? '<span class="caret"></span>' : '');
+    let html = formatEkko(visible);
+    if (writingMemory) {
+      html += '<div style="font-size: 11px; color: var(--ink-dimmer); font-style: italic; margin-top: 8px;">writing a memory…</div>';
+    } else if (showCaret) {
+      html += '<span class="caret"></span>';
+    }
+    streamBody.innerHTML = html;
   }
 
   // the painter — drips chars out at the configured speed
@@ -1623,10 +1890,27 @@ async function sendMessage() {
       removeTyping();
       appendMsg('system', '— empty response —');
     } else {
-      // strip caret, finalise
-      streamBody.innerHTML = formatEkko(bufferedText);
-      messages.push({ role: 'ekko', content: bufferedText });
+      // parse out any memory proposals
+      const { cleanText, proposals } = parseMemoryProposals(bufferedText);
+
+      // re-render the bubble with the cleaned text (no <memory> blocks visible)
+      streamBody.innerHTML = formatEkko(cleanText);
+
+      // save the message — store both the clean text and any proposals so they persist
+      const msgRecord = { role: 'ekko', content: cleanText };
+      if (proposals.length > 0) {
+        msgRecord.proposals = proposals;
+      }
+      messages.push(msgRecord);
       saveMessages();
+
+      // append memory proposal cards inside the same message bubble
+      if (proposals.length > 0) {
+        for (const p of proposals) {
+          renderPendingMemoryCard(p, streamEl);
+        }
+        scrollToBottom();
+      }
     }
 
   } catch (err) {
@@ -1706,6 +1990,7 @@ $('saveBtn').addEventListener('click', () => {
   state.typingSpeed = parseInt($('typingSpeed').value);
   if (isNaN(state.typingSpeed) || state.typingSpeed < 0) state.typingSpeed = 40;
   state.typingPauses = $('typingPauses').value === 'true';
+  state.selfWriteMemory = $('selfWriteMemory').value === 'true';
   saveState();
   showToast('saved');
   closeDrawer();
