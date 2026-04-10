@@ -528,7 +528,8 @@
     max-width: 480px;
     max-height: 100%;
     overflow-y: auto;
-    pointer-events: auto;
+    pointer-events: none;
+    visibility: hidden;
     transform: translateY(20px);
     opacity: 0;
     transition: all 0.25s;
@@ -538,6 +539,8 @@
   .modal.open .modal-card {
     transform: translateY(0);
     opacity: 1;
+    pointer-events: auto;
+    visibility: visible;
   }
   .modal-head {
     display: flex;
