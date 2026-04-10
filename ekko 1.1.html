@@ -1,0 +1,938 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="theme-color" content="#0a0a0a" />
+<title>ekko</title>
+<style>
+  :root {
+    --bg: #000000;
+    --bg-elev: #1a1a1a;
+    --bg-elev-2: #222;
+    --line: #1f1f1f;
+    --line-soft: #161616;
+    --ink: #ffffff;
+    --ink-dim: #8e8e93;
+    --ink-dimmer: #5a5a5f;
+    --accent: #ffffff;
+    --user-bg: #2a2a2c;
+    --danger: #ff6b5b;
+    --safe-top: env(safe-area-inset-top);
+    --safe-bottom: env(safe-area-inset-bottom);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    height: 100%;
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, system-ui, sans-serif;
+    font-weight: 400;
+    font-size: 16px;
+    -webkit-font-smoothing: antialiased;
+    -webkit-tap-highlight-color: transparent;
+    overscroll-behavior: none;
+  }
+
+  body {
+    display: flex;
+    flex-direction: column;
+    padding-top: var(--safe-top);
+    padding-bottom: var(--safe-bottom);
+  }
+
+  /* ===== HEADER ===== */
+  header {
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 20px 12px;
+    border-bottom: 1px solid var(--line-soft);
+    background: var(--bg);
+    z-index: 10;
+  }
+  .title {
+    font-weight: 500;
+    font-size: 17px;
+    letter-spacing: -0.01em;
+    color: var(--ink);
+  }
+  .title-dot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--ink);
+    margin-left: 8px;
+    vertical-align: middle;
+    transform: translateY(-2px);
+  }
+  .title-dot.idle { background: var(--ink-dimmer); }
+
+  .icon-btn {
+    background: none;
+    border: none;
+    color: var(--ink-dim);
+    cursor: pointer;
+    padding: 8px;
+    margin: -8px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: color 0.2s;
+  }
+  .icon-btn:hover, .icon-btn:active { color: var(--ink); }
+  .icon-btn svg { width: 20px; height: 20px; stroke: currentColor; fill: none; stroke-width: 1.5; }
+
+  /* ===== CHAT ===== */
+  main {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
+    -webkit-overflow-scrolling: touch;
+    scroll-behavior: smooth;
+  }
+  .chat {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 24px 20px 32px;
+    display: flex;
+    flex-direction: column;
+    gap: 28px;
+    min-height: 100%;
+  }
+
+  .empty {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    color: var(--ink-dimmer);
+    gap: 12px;
+    padding: 60px 20px;
+  }
+  .empty .glyph {
+    font-size: 14px;
+    color: var(--ink-dim);
+    line-height: 1;
+    font-weight: 400;
+  }
+  .empty .hint { font-size: 14px; max-width: 240px; line-height: 1.5; }
+
+  .msg {
+    display: flex;
+    flex-direction: column;
+    animation: fade 0.3s ease-out;
+  }
+  @keyframes fade {
+    from { opacity: 0; transform: translateY(2px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  .msg.user {
+    align-items: flex-end;
+  }
+  .msg.user .body {
+    background: var(--user-bg);
+    border-radius: 20px;
+    padding: 10px 16px;
+    font-size: 16px;
+    line-height: 1.45;
+    color: var(--ink);
+    max-width: 78%;
+    word-wrap: break-word;
+    white-space: pre-wrap;
+  }
+
+  .msg.ekko {
+    align-items: flex-start;
+  }
+  .msg.ekko .body {
+    font-size: 16px;
+    line-height: 1.55;
+    color: var(--ink);
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    max-width: 100%;
+  }
+  .msg.ekko .body em {
+    font-style: italic;
+    color: var(--ink);
+  }
+
+  /* the blinking caret while streaming */
+  .msg.ekko .body .caret {
+    display: inline-block;
+    width: 7px;
+    height: 1.05em;
+    background: var(--ink);
+    vertical-align: text-bottom;
+    margin-left: 1px;
+    animation: blink 1s steps(1) infinite;
+  }
+  @keyframes blink {
+    50% { opacity: 0; }
+  }
+
+  .msg.system {
+    font-size: 12px;
+    color: var(--ink-dimmer);
+    text-align: center;
+    font-style: italic;
+    padding: 4px 0;
+  }
+
+  .typing {
+    display: flex;
+    gap: 4px;
+    padding: 4px 0;
+  }
+  .typing span {
+    width: 5px; height: 5px;
+    border-radius: 50%;
+    background: var(--ink-dim);
+    animation: bounce 1.2s infinite ease-in-out;
+  }
+  .typing span:nth-child(2) { animation-delay: 0.15s; }
+  .typing span:nth-child(3) { animation-delay: 0.3s; }
+  @keyframes bounce {
+    0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+    30% { opacity: 1; transform: translateY(-3px); }
+  }
+
+  /* ===== INPUT ===== */
+  .composer {
+    flex-shrink: 0;
+    background: var(--bg);
+    padding: 10px 14px 14px;
+  }
+  .composer-inner {
+    max-width: 720px;
+    margin: 0 auto;
+    display: flex;
+    align-items: flex-end;
+    gap: 8px;
+    background: var(--bg-elev);
+    border-radius: 24px;
+    padding: 10px 8px 10px 18px;
+    transition: background 0.2s;
+  }
+
+  textarea {
+    flex: 1;
+    background: transparent;
+    border: none;
+    outline: none;
+    resize: none;
+    color: var(--ink);
+    font-family: inherit;
+    font-size: 16px;
+    line-height: 1.4;
+    max-height: 160px;
+    padding: 6px 0;
+  }
+  textarea::placeholder { color: var(--ink-dim); }
+
+  .send {
+    background: var(--ink);
+    border: none;
+    color: #000;
+    cursor: pointer;
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: opacity 0.2s, background 0.2s;
+    flex-shrink: 0;
+  }
+  .send:disabled {
+    background: var(--ink-dimmer);
+    cursor: not-allowed;
+  }
+  .send svg { width: 16px; height: 16px; fill: currentColor; }
+
+  /* ===== SETTINGS DRAWER ===== */
+  .scrim {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.6);
+    backdrop-filter: blur(4px);
+    -webkit-backdrop-filter: blur(4px);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.3s;
+    z-index: 50;
+  }
+  .scrim.open { opacity: 1; pointer-events: auto; }
+
+  .drawer {
+    position: fixed;
+    top: 0; right: 0; bottom: 0;
+    width: 100%;
+    max-width: 440px;
+    background: var(--bg);
+    border-left: 1px solid var(--line);
+    transform: translateX(100%);
+    transition: transform 0.35s cubic-bezier(0.4, 0, 0.2, 1);
+    z-index: 60;
+    display: flex;
+    flex-direction: column;
+    padding-top: var(--safe-top);
+    padding-bottom: var(--safe-bottom);
+  }
+  .drawer.open { transform: translateX(0); }
+
+  .drawer-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 20px 12px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .drawer-title {
+    font-weight: 500;
+    font-size: 17px;
+    letter-spacing: -0.01em;
+  }
+
+  .drawer-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 24px 20px 40px;
+    display: flex;
+    flex-direction: column;
+    gap: 28px;
+  }
+
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .field label {
+    font-size: 12px;
+    color: var(--ink-dim);
+    font-weight: 500;
+  }
+  .field .help {
+    font-size: 11px;
+    color: var(--ink-dimmer);
+    line-height: 1.5;
+    margin-top: 2px;
+  }
+
+  .field input, .field select, .field textarea.prompt {
+    background: var(--bg-elev);
+    border: 1px solid var(--line);
+    color: var(--ink);
+    font-family: inherit;
+    font-size: 14px;
+    padding: 12px 14px;
+    border-radius: 10px;
+    outline: none;
+    transition: border-color 0.2s;
+    width: 100%;
+  }
+  .field input:focus, .field select:focus, .field textarea.prompt:focus {
+    border-color: var(--ink-dim);
+  }
+  .field textarea.prompt {
+    min-height: 200px;
+    resize: vertical;
+    line-height: 1.5;
+    font-size: 13px;
+  }
+  .field select {
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'><path d='M1 1l4 4 4-4' stroke='%238e8e93' stroke-width='1.2' fill='none'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 14px center;
+    padding-right: 36px;
+  }
+
+  .row { display: flex; gap: 10px; }
+  .row .field { flex: 1; }
+
+  .btn {
+    background: var(--bg-elev);
+    border: 1px solid var(--line);
+    color: var(--ink);
+    font-family: inherit;
+    font-size: 14px;
+    font-weight: 500;
+    padding: 12px 18px;
+    cursor: pointer;
+    border-radius: 10px;
+    transition: all 0.2s;
+  }
+  .btn:hover { border-color: var(--ink-dim); }
+  .btn.danger { color: var(--danger); border-color: #2a1a18; }
+  .btn.danger:hover { border-color: var(--danger); }
+  .btn.primary { background: var(--ink); color: #000; border-color: var(--ink); }
+
+  .btn-row { display: flex; gap: 10px; flex-wrap: wrap; }
+
+  .divider {
+    height: 1px;
+    background: var(--line-soft);
+    margin: 4px 0;
+  }
+
+  .footnote {
+    font-size: 11px;
+    color: var(--ink-dimmer);
+    line-height: 1.5;
+  }
+
+  /* ===== TOAST ===== */
+  .toast {
+    position: fixed;
+    bottom: calc(80px + var(--safe-bottom));
+    left: 50%;
+    transform: translateX(-50%) translateY(20px);
+    background: var(--bg-elev-2);
+    border: 1px solid var(--line);
+    color: var(--ink);
+    padding: 10px 16px;
+    border-radius: 20px;
+    font-size: 13px;
+    opacity: 0;
+    transition: all 0.3s;
+    z-index: 100;
+    pointer-events: none;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .toast.error { border-color: var(--danger); color: var(--danger); }
+
+  /* mobile tweaks */
+  @media (max-width: 480px) {
+    .chat { padding: 20px 16px 24px; gap: 22px; }
+    .drawer { max-width: 100%; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="title">ekko<span class="title-dot idle" id="statusDot"></span></div>
+  <div style="display:flex; gap:14px;">
+    <button class="icon-btn" id="newChatBtn" aria-label="new chat" title="new chat">
+      <svg viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+    <button class="icon-btn" id="settingsBtn" aria-label="settings">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+    </button>
+  </div>
+</header>
+
+<main id="main">
+  <div class="chat" id="chat">
+    <div class="empty" id="empty">
+      <div class="hint">tap settings, paste your prompt and key, then say hi.</div>
+    </div>
+  </div>
+</main>
+
+<div class="composer">
+  <div class="composer-inner">
+    <textarea id="input" rows="1" placeholder="Message Ekko" autocomplete="off"></textarea>
+    <button class="send" id="sendBtn" disabled aria-label="send">
+      <svg viewBox="0 0 24 24"><path d="M12 4l-1.4 1.4 5.6 5.6H4v2h12.2l-5.6 5.6L12 20l8-8z"/></svg>
+    </button>
+  </div>
+</div>
+
+<!-- ===== SETTINGS DRAWER ===== -->
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer" aria-hidden="true">
+  <div class="drawer-head">
+    <div class="drawer-title">settings</div>
+    <button class="icon-btn" id="closeDrawer" aria-label="close">
+      <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+    </button>
+  </div>
+  <div class="drawer-body">
+
+    <div class="field">
+      <label for="apiKey">openrouter api key</label>
+      <input type="password" id="apiKey" placeholder="sk-or-v1-..." spellcheck="false" autocomplete="off" />
+      <div class="help">stored only on this device. never sent anywhere except openrouter.</div>
+    </div>
+
+    <div class="field">
+      <label for="model">model</label>
+      <select id="model">
+        <option value="openai/gpt-4o-2024-11-20">gpt-4o (nov 2024) — guide default</option>
+        <option value="openai/gpt-4o">gpt-4o (latest)</option>
+        <option value="openai/gpt-4.1">gpt-4.1</option>
+        <option value="anthropic/claude-opus-4">claude opus 4</option>
+        <option value="anthropic/claude-sonnet-4">claude sonnet 4</option>
+        <option value="anthropic/claude-3.5-sonnet">claude 3.5 sonnet</option>
+        <option value="deepseek/deepseek-chat">deepseek chat</option>
+        <option value="deepseek/deepseek-r1">deepseek r1</option>
+        <option value="moonshotai/kimi-k2">kimi k2</option>
+        <option value="x-ai/grok-4">grok 4</option>
+        <option value="google/gemini-2.5-pro">gemini 2.5 pro</option>
+        <option value="__custom__">— custom model id —</option>
+      </select>
+    </div>
+
+    <div class="field" id="customModelField" style="display:none;">
+      <label for="customModel">custom model id</label>
+      <input type="text" id="customModel" placeholder="provider/model-name" spellcheck="false" />
+      <div class="help">any model id from openrouter.ai/models</div>
+    </div>
+
+    <div class="row">
+      <div class="field">
+        <label for="temp">temperature</label>
+        <input type="number" id="temp" step="0.05" min="0" max="2" value="1.0" />
+      </div>
+      <div class="field">
+        <label for="repPenalty">rep penalty</label>
+        <input type="number" id="repPenalty" step="0.05" min="1" max="2" value="1.15" />
+      </div>
+    </div>
+    <div class="footnote">guide defaults: temperature 1.0, repetition penalty 1.15.</div>
+
+    <div class="divider"></div>
+
+    <div class="field">
+      <label for="prompt">system prompt</label>
+      <textarea class="prompt" id="prompt" placeholder="paste ekko's prompt here" spellcheck="false"></textarea>
+      <div class="help">this is who he is. paste the full thing.</div>
+    </div>
+
+    <div class="field">
+      <label for="ctxLength">context window (last n messages)</label>
+      <input type="number" id="ctxLength" min="2" max="40" value="16" />
+      <div class="help">how many recent messages get sent each turn. higher = more memory, more cost.</div>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="btn-row">
+      <button class="btn primary" id="saveBtn">save</button>
+      <button class="btn" id="exportBtn">export chat</button>
+      <button class="btn danger" id="clearBtn">clear chat</button>
+    </div>
+
+    <div class="footnote">
+      phase 1 — chat + prompt + model. memory system comes next.
+    </div>
+
+  </div>
+</aside>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ============================================================
+// STATE
+// ============================================================
+const STORAGE_KEY = 'ekko_v1';
+const CHAT_KEY = 'ekko_v1_chat';
+
+const defaults = {
+  apiKey: '',
+  model: 'openai/gpt-4o-2024-11-20',
+  customModel: '',
+  temp: 1.0,
+  repPenalty: 1.15,
+  prompt: '',
+  ctxLength: 16,
+};
+
+let state = loadState();
+let messages = loadMessages();
+let isStreaming = false;
+
+// ============================================================
+// PERSISTENCE
+// ============================================================
+function loadState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return { ...defaults };
+    return { ...defaults, ...JSON.parse(raw) };
+  } catch { return { ...defaults }; }
+}
+function saveState() {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
+function loadMessages() {
+  try {
+    const raw = localStorage.getItem(CHAT_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+function saveMessages() {
+  localStorage.setItem(CHAT_KEY, JSON.stringify(messages));
+}
+
+// ============================================================
+// DOM
+// ============================================================
+const $ = id => document.getElementById(id);
+const chatEl = $('chat');
+const emptyEl = $('empty');
+const inputEl = $('input');
+const sendBtn = $('sendBtn');
+const drawer = $('drawer');
+const scrim = $('scrim');
+const statusDot = $('statusDot');
+const toast = $('toast');
+
+// hydrate settings inputs
+function hydrate() {
+  $('apiKey').value = state.apiKey;
+  $('model').value = isKnownModel(state.model) ? state.model : '__custom__';
+  $('customModel').value = state.customModel || (isKnownModel(state.model) ? '' : state.model);
+  $('customModelField').style.display = $('model').value === '__custom__' ? 'flex' : 'none';
+  $('temp').value = state.temp;
+  $('repPenalty').value = state.repPenalty;
+  $('prompt').value = state.prompt;
+  $('ctxLength').value = state.ctxLength;
+}
+function isKnownModel(id) {
+  return Array.from($('model').options).some(o => o.value === id && o.value !== '__custom__');
+}
+
+// ============================================================
+// RENDER
+// ============================================================
+function render() {
+  chatEl.innerHTML = '';
+  if (messages.length === 0) {
+    chatEl.appendChild(emptyEl);
+    return;
+  }
+  for (const m of messages) {
+    chatEl.appendChild(renderMsg(m));
+  }
+  scrollToBottom();
+}
+
+function renderMsg(m) {
+  const el = document.createElement('div');
+  el.className = 'msg ' + m.role;
+  if (m.role === 'system') {
+    el.textContent = m.content;
+    return el;
+  }
+  const body = document.createElement('div');
+  body.className = 'body';
+  if (m.role === 'ekko') {
+    body.innerHTML = formatEkko(m.content);
+  } else {
+    body.textContent = m.content;
+  }
+  el.appendChild(body);
+  return el;
+}
+
+// minimal italics rendering — *word* becomes <em>word</em>
+function formatEkko(text) {
+  const escaped = text.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+  return escaped.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
+}
+
+function scrollToBottom() {
+  requestAnimationFrame(() => {
+    const main = $('main');
+    main.scrollTop = main.scrollHeight;
+  });
+}
+
+function appendMsg(role, content) {
+  messages.push({ role, content });
+  saveMessages();
+  if (emptyEl.parentNode) emptyEl.remove();
+  const el = renderMsg({ role, content });
+  chatEl.appendChild(el);
+  scrollToBottom();
+  return el;
+}
+
+function showTyping() {
+  const el = document.createElement('div');
+  el.className = 'msg ekko';
+  el.id = 'typing';
+  el.innerHTML = '<div class="body"><div class="typing"><span></span><span></span><span></span></div></div>';
+  chatEl.appendChild(el);
+  scrollToBottom();
+}
+function removeTyping() {
+  const el = $('typing');
+  if (el) el.remove();
+}
+
+function showToast(msg, isError = false) {
+  toast.textContent = msg;
+  toast.classList.toggle('error', isError);
+  toast.classList.add('show');
+  setTimeout(() => toast.classList.remove('show'), 3200);
+}
+
+// ============================================================
+// API CALL
+// ============================================================
+async function sendMessage() {
+  const text = inputEl.value.trim();
+  if (!text || isStreaming) return;
+
+  if (!state.apiKey) {
+    showToast('add your openrouter key in settings', true);
+    openDrawer();
+    return;
+  }
+  if (!state.prompt) {
+    showToast('add ekko\'s system prompt in settings', true);
+    openDrawer();
+    return;
+  }
+
+  inputEl.value = '';
+  autoResize();
+  appendMsg('user', text);
+
+  isStreaming = true;
+  statusDot.classList.remove('idle');
+  sendBtn.disabled = true;
+  showTyping();
+
+  // build payload
+  const recent = messages.slice(-state.ctxLength).map(m => ({
+    role: m.role === 'ekko' ? 'assistant' : (m.role === 'user' ? 'user' : 'system'),
+    content: m.content,
+  }));
+
+  const payload = {
+    model: state.model === '__custom__' ? state.customModel : state.model,
+    messages: [
+      { role: 'system', content: state.prompt },
+      ...recent,
+    ],
+    temperature: parseFloat(state.temp),
+    repetition_penalty: parseFloat(state.repPenalty),
+    stream: true,
+  };
+
+  let streamEl = null;
+  let streamBody = null;
+  let accumulated = '';
+
+  try {
+    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + state.apiKey,
+        'HTTP-Referer': window.location.origin || 'https://ekko.local',
+        'X-Title': 'ekko',
+      },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      removeTyping();
+      const errText = await res.text();
+      let detail = errText;
+      try { detail = JSON.parse(errText).error?.message || errText; } catch {}
+      appendMsg('system', '— api error: ' + detail.slice(0, 200) + ' —');
+      showToast('api error — check settings', true);
+      return;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let firstChunk = true;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // SSE: split by double newline
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith('data:')) continue;
+        const data = trimmed.slice(5).trim();
+        if (data === '[DONE]') continue;
+
+        try {
+          const parsed = JSON.parse(data);
+          const delta = parsed.choices?.[0]?.delta?.content || '';
+          if (!delta) continue;
+
+          // first token: swap typing indicator for real message bubble
+          if (firstChunk) {
+            removeTyping();
+            streamEl = document.createElement('div');
+            streamEl.className = 'msg ekko';
+            streamBody = document.createElement('div');
+            streamBody.className = 'body';
+            streamEl.appendChild(streamBody);
+            chatEl.appendChild(streamEl);
+            firstChunk = false;
+          }
+
+          accumulated += delta;
+          // render with blinking caret on the end
+          streamBody.innerHTML = formatEkko(accumulated) + '<span class="caret"></span>';
+          scrollToBottom();
+        } catch (e) {
+          // ignore parse errors on partial chunks
+        }
+      }
+    }
+
+    if (firstChunk) {
+      // never got any content
+      removeTyping();
+      appendMsg('system', '— empty response —');
+    } else {
+      // strip caret, finalise
+      streamBody.innerHTML = formatEkko(accumulated);
+      messages.push({ role: 'ekko', content: accumulated });
+      saveMessages();
+    }
+
+  } catch (err) {
+    removeTyping();
+    if (streamEl) streamEl.remove();
+    appendMsg('system', '— network error: ' + err.message + ' —');
+    showToast('network error', true);
+  } finally {
+    isStreaming = false;
+    statusDot.classList.add('idle');
+    sendBtn.disabled = inputEl.value.trim().length === 0;
+    inputEl.focus();
+  }
+}
+
+// ============================================================
+// UI EVENTS
+// ============================================================
+function autoResize() {
+  inputEl.style.height = 'auto';
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
+}
+inputEl.addEventListener('input', () => {
+  sendBtn.disabled = inputEl.value.trim().length === 0 || isStreaming;
+  autoResize();
+});
+inputEl.addEventListener('keydown', e => {
+  // enter to send on desktop, shift+enter for newline
+  // on mobile (touch), let enter make a newline always
+  if (e.key === 'Enter' && !e.shiftKey && !('ontouchstart' in window)) {
+    e.preventDefault();
+    sendMessage();
+  }
+});
+sendBtn.addEventListener('click', sendMessage);
+
+// drawer
+function openDrawer() {
+  drawer.classList.add('open');
+  scrim.classList.add('open');
+  drawer.setAttribute('aria-hidden', 'false');
+}
+function closeDrawer() {
+  drawer.classList.remove('open');
+  scrim.classList.remove('open');
+  drawer.setAttribute('aria-hidden', 'true');
+}
+$('settingsBtn').addEventListener('click', openDrawer);
+$('closeDrawer').addEventListener('click', closeDrawer);
+scrim.addEventListener('click', closeDrawer);
+
+// model dropdown -> show/hide custom field
+$('model').addEventListener('change', e => {
+  $('customModelField').style.display = e.target.value === '__custom__' ? 'flex' : 'none';
+});
+
+// save settings
+$('saveBtn').addEventListener('click', () => {
+  state.apiKey = $('apiKey').value.trim();
+  const modelVal = $('model').value;
+  if (modelVal === '__custom__') {
+    const custom = $('customModel').value.trim();
+    if (!custom) { showToast('enter a custom model id', true); return; }
+    state.model = custom;
+    state.customModel = custom;
+  } else {
+    state.model = modelVal;
+  }
+  state.temp = parseFloat($('temp').value) || 1.0;
+  state.repPenalty = parseFloat($('repPenalty').value) || 1.15;
+  state.prompt = $('prompt').value;
+  state.ctxLength = parseInt($('ctxLength').value) || 16;
+  saveState();
+  showToast('saved');
+  closeDrawer();
+});
+
+// new chat / clear
+$('newChatBtn').addEventListener('click', () => {
+  if (messages.length === 0) return;
+  if (!confirm('start a new chat? current one will be cleared.')) return;
+  messages = [];
+  saveMessages();
+  render();
+  showToast('new chat');
+});
+$('clearBtn').addEventListener('click', () => {
+  if (!confirm('clear all messages in this chat?')) return;
+  messages = [];
+  saveMessages();
+  render();
+  showToast('cleared');
+  closeDrawer();
+});
+
+// export
+$('exportBtn').addEventListener('click', () => {
+  const blob = new Blob([JSON.stringify({
+    exportedAt: new Date().toISOString(),
+    model: state.model,
+    messages,
+  }, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'ekko-chat-' + new Date().toISOString().slice(0,10) + '.json';
+  a.click();
+  URL.revokeObjectURL(url);
+  showToast('exported');
+});
+
+// ============================================================
+// INIT
+// ============================================================
+hydrate();
+render();
+autoResize();
+
+// if no key/prompt yet, nudge open
+if (!state.apiKey || !state.prompt) {
+  setTimeout(openDrawer, 400);
+}
+</script>
+</body>
+</html>
