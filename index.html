@@ -632,6 +632,30 @@
   .mem-indicator.show { display: inline-flex; align-items: center; gap: 4px; }
   .mem-indicator:hover { color: var(--ink); border-color: var(--ink-dim); }
 
+  /* model switcher in header */
+  .model-switcher {
+    background: none;
+    border: 1px solid var(--line);
+    color: var(--ink-dim);
+    font-family: inherit;
+    font-size: 11px;
+    padding: 3px 8px 3px 10px;
+    border-radius: 10px;
+    cursor: pointer;
+    appearance: none;
+    -webkit-appearance: none;
+    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='8' height='5' viewBox='0 0 8 5'><path d='M1 1l3 3 3-3' stroke='%238e8e93' stroke-width='1.2' fill='none'/></svg>");
+    background-repeat: no-repeat;
+    background-position: right 6px center;
+    padding-right: 18px;
+    max-width: 130px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .model-switcher:hover { color: var(--ink); border-color: var(--ink-dim); }
+  .model-switcher option { background: var(--bg-elev); color: var(--ink); }
+
   /* ===== AUTH SCREEN ===== */
   .auth-screen {
     position: fixed;
@@ -860,7 +884,8 @@
 
 <header>
   <div class="title">ekko<span class="title-dot idle" id="statusDot"></span></div>
-  <div style="display:flex; gap:14px; align-items:center;">
+  <div style="display:flex; gap:10px; align-items:center;">
+    <select class="model-switcher" id="headerModelSwitcher" aria-label="model"></select>
     <button class="mem-indicator" id="memIndicator" aria-label="memories used">
       <span id="memIndicatorCount">0</span>
     </button>
@@ -926,17 +951,29 @@
     <div class="field">
       <label for="model">model</label>
       <select id="model">
-        <option value="openai/gpt-4o-2024-11-20">gpt-4o (nov 2024) — guide default</option>
-        <option value="openai/gpt-4o">gpt-4o (latest)</option>
-        <option value="openai/gpt-4.1">gpt-4.1</option>
-        <option value="anthropic/claude-opus-4">claude opus 4</option>
-        <option value="anthropic/claude-sonnet-4">claude sonnet 4</option>
-        <option value="anthropic/claude-3.5-sonnet">claude 3.5 sonnet</option>
-        <option value="deepseek/deepseek-chat">deepseek chat</option>
-        <option value="deepseek/deepseek-r1">deepseek r1</option>
-        <option value="moonshotai/kimi-k2">kimi k2</option>
-        <option value="x-ai/grok-4">grok 4</option>
-        <option value="google/gemini-2.5-pro">gemini 2.5 pro</option>
+        <optgroup label="deepseek">
+          <option value="deepseek/deepseek-v3.2">deepseek v3.2 (text only)</option>
+          <option value="deepseek/deepseek-v3.2-speciale">deepseek v3.2 speciale (text only)</option>
+          <option value="deepseek/deepseek-v3.2-exp">deepseek v3.2 exp (text only)</option>
+        </optgroup>
+        <optgroup label="openai">
+          <option value="openai/gpt-5.4">gpt-5.4 — vision</option>
+          <option value="openai/gpt-4o-2024-11-20">gpt-4o (nov 2024) — vision</option>
+          <option value="openai/gpt-4o">gpt-4o latest — vision</option>
+        </optgroup>
+        <optgroup label="anthropic">
+          <option value="anthropic/claude-opus-4.6">claude opus 4.6 — vision</option>
+          <option value="anthropic/claude-sonnet-4.6">claude sonnet 4.6 — vision</option>
+        </optgroup>
+        <optgroup label="google">
+          <option value="google/gemini-3.1-pro">gemini 3.1 pro — vision</option>
+          <option value="google/gemini-3.1-flash-lite">gemini 3.1 flash lite — vision</option>
+        </optgroup>
+        <optgroup label="other">
+          <option value="moonshotai/kimi-k2.5">kimi k2.5 — vision</option>
+          <option value="minimax/minimax-m2.5">minimax m2.5 (text only)</option>
+          <option value="x-ai/grok-4">grok 4</option>
+        </optgroup>
         <option value="__custom__">— custom model id —</option>
       </select>
     </div>
@@ -1193,7 +1230,7 @@ const MEM_KEY = 'ekko_v1_memories';
 
 const defaults = {
   apiKey: '',
-  model: 'openai/gpt-4o-2024-11-20',
+  model: 'deepseek/deepseek-v3.2',
   customModel: '',
   temp: 1.0,
   repPenalty: 1.15,
@@ -2281,6 +2318,67 @@ $('model').addEventListener('change', e => {
   $('customModelField').style.display = e.target.value === '__custom__' ? 'flex' : 'none';
 });
 
+// ===== header model switcher =====
+function populateHeaderSwitcher() {
+  const header = $('headerModelSwitcher');
+  const drawer = $('model');
+  // clone all options from the drawer dropdown into the header one
+  header.innerHTML = '';
+  for (const child of drawer.children) {
+    if (child.tagName === 'OPTGROUP') {
+      const og = document.createElement('optgroup');
+      og.label = child.label;
+      for (const opt of child.children) {
+        const o = document.createElement('option');
+        o.value = opt.value;
+        o.textContent = opt.textContent;
+        og.appendChild(o);
+      }
+      header.appendChild(og);
+    } else {
+      const o = document.createElement('option');
+      o.value = child.value;
+      o.textContent = child.textContent;
+      header.appendChild(o);
+    }
+  }
+  syncHeaderSwitcherValue();
+}
+function syncHeaderSwitcherValue() {
+  const header = $('headerModelSwitcher');
+  // if current model is in the list, select it; otherwise add it as a one-off option
+  const exists = Array.from(header.options).some(o => o.value === state.model);
+  if (exists) {
+    header.value = state.model;
+  } else {
+    // model is a custom one not in the dropdown — add it temporarily so it can be displayed
+    const o = document.createElement('option');
+    o.value = state.model;
+    o.textContent = state.model;
+    header.insertBefore(o, header.firstChild);
+    header.value = state.model;
+  }
+}
+
+$('headerModelSwitcher').addEventListener('change', e => {
+  const val = e.target.value;
+  if (val === '__custom__') {
+    // can't enter a custom model id from the header dropdown — open settings instead
+    syncHeaderSwitcherValue(); // reset selection
+    openDrawer();
+    showToast('enter custom model id in settings');
+    return;
+  }
+  state.model = val;
+  saveState(); // triggers cloud sync
+  // also update the drawer dropdown if it's visible, so they stay in sync
+  if (Array.from($('model').options).some(o => o.value === val)) {
+    $('model').value = val;
+    $('customModelField').style.display = 'none';
+  }
+  showToast('switched to ' + val.split('/').pop());
+});
+
 // save settings
 $('saveBtn').addEventListener('click', () => {
   state.apiKey = $('apiKey').value.trim();
@@ -2304,6 +2402,7 @@ $('saveBtn').addEventListener('click', () => {
   state.typingPauses = $('typingPauses').value === 'true';
   state.selfWriteMemory = $('selfWriteMemory').value === 'true';
   saveState();
+  syncHeaderSwitcherValue();
   showToast('saved');
   closeDrawer();
 });
@@ -2632,6 +2731,7 @@ async function loadFromCloud() {
     hydrate();
     render();
     renderMemList();
+    syncHeaderSwitcherValue();
 
     // if cloud is totally empty but local has data, offer migration
     const cloudEmpty = !cloudSettings && cloudMessages.length === 0 && cloudMemories.length === 0;
@@ -2695,6 +2795,7 @@ render();
 renderMemList();
 autoResize();
 setCloudStatus('offline');
+populateHeaderSwitcher();
 
 // boot: check for existing supabase session
 (async () => {
