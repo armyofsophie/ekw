@@ -747,6 +747,12 @@
   }
   .cloud-status.connected::before { background: #6dd06d; }
   .cloud-status.error::before { background: var(--danger); }
+  .cloud-status.syncing::before { background: #d4a857; animation: pulse 1s infinite; }
+  .cloud-status.pending::before { background: #d4a857; }
+  .cloud-status.synced::before { background: #6dd06d; }
+  @keyframes pulse {
+    50% { opacity: 0.3; }
+  }
 
   /* ===== PENDING MEMORY CARD (inline in chat) ===== */
   .pending-mem {
@@ -897,8 +903,11 @@
 
     <div class="field">
       <label>cloud</label>
-      <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px;">
-        <span class="cloud-status" id="cloudStatus">offline</span>
+      <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;">
+        <div style="display: flex; gap: 8px; align-items: center;">
+          <span class="cloud-status" id="cloudStatus">offline</span>
+          <span class="cloud-status" id="syncStatus" style="display: none;">synced</span>
+        </div>
         <button class="btn" id="signOutBtn" style="display: none;">sign out</button>
       </div>
       <div class="help" id="cloudUserEmail"></div>
@@ -1215,6 +1224,9 @@ function loadState() {
 }
 function saveState() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  if (cloudReady && currentUser) {
+    queueSync('settings');
+  }
 }
 function loadMessages() {
   try {
@@ -1224,6 +1236,9 @@ function loadMessages() {
 }
 function saveMessages() {
   localStorage.setItem(CHAT_KEY, JSON.stringify(messages));
+  if (cloudReady && currentUser) {
+    queueSync('messages');
+  }
 }
 function loadMemories() {
   try {
@@ -1233,6 +1248,9 @@ function loadMemories() {
 }
 function saveMemories() {
   localStorage.setItem(MEM_KEY, JSON.stringify(memories));
+  if (cloudReady && currentUser) {
+    queueSync('memories');
+  }
 }
 
 // ============================================================
@@ -2357,6 +2375,52 @@ $('injectModalScrim').addEventListener('click', closeInjectModal);
 // CLOUD SYNC (PASS 1: read from cloud, write to both)
 // ============================================================
 
+// ----- sync queue / debouncer -----
+const syncTimers = { settings: null, messages: null, memories: null };
+const syncPending = { settings: false, messages: false, memories: false };
+const SYNC_DEBOUNCE_MS = 800;
+
+function queueSync(kind) {
+  syncPending[kind] = true;
+  setSyncStatus('pending');
+  if (syncTimers[kind]) clearTimeout(syncTimers[kind]);
+  syncTimers[kind] = setTimeout(() => doSync(kind), SYNC_DEBOUNCE_MS);
+}
+
+async function doSync(kind) {
+  syncTimers[kind] = null;
+  if (!cloudReady || !currentUser) return;
+  setSyncStatus('syncing');
+  try {
+    if (kind === 'settings') {
+      await pushSettingsToCloud(state);
+    } else if (kind === 'messages') {
+      await pushMessagesToCloud(messages);
+    } else if (kind === 'memories') {
+      await pushMemoriesToCloud(memories);
+    }
+    syncPending[kind] = false;
+    // if any other kind is still pending, stay in pending state
+    const stillPending = Object.values(syncPending).some(v => v);
+    setSyncStatus(stillPending ? 'pending' : 'synced');
+  } catch (err) {
+    console.error('sync failed', kind, err);
+    setSyncStatus('error');
+    showToast('cloud sync failed for ' + kind, true);
+  }
+}
+
+function setSyncStatus(status) {
+  const el = $('syncStatus');
+  if (!el) return;
+  el.classList.remove('syncing', 'pending', 'error', 'synced');
+  el.classList.add(status);
+  if (status === 'syncing') el.textContent = 'syncing…';
+  else if (status === 'pending') el.textContent = 'pending';
+  else if (status === 'error') el.textContent = 'sync error';
+  else el.textContent = 'synced';
+}
+
 // ----- auth screen -----
 function showAuthScreen() {
   $('authScreen').classList.add('show');
@@ -2589,12 +2653,14 @@ function setCloudStatus(status) {
     el.classList.add('connected');
     el.textContent = 'connected';
     $('signOutBtn').style.display = 'inline-block';
+    $('syncStatus').style.display = 'inline-flex';
     if (currentUser) $('cloudUserEmail').textContent = currentUser.email;
   } else if (status === 'error') {
     el.classList.add('error');
     el.textContent = 'error';
   } else {
     el.textContent = 'offline';
+    $('syncStatus').style.display = 'none';
   }
 }
 
