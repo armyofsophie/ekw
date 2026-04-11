@@ -168,6 +168,19 @@
     font-style: italic;
     color: var(--ink);
   }
+  .msg.ekko .body hr {
+    border: none;
+    border-top: 1px solid var(--line);
+    margin: 18px 0;
+    width: 60%;
+  }
+  .msg.ekko .body blockquote {
+    margin: 8px 0 8px 0;
+    padding: 4px 0 4px 14px;
+    border-left: 2px solid var(--line);
+    color: var(--ink-dim);
+    font-style: italic;
+  }
 
   /* the blinking caret while streaming */
   .msg.ekko .body .caret {
@@ -303,6 +316,37 @@
   .send.streaming:disabled { background: var(--ink); cursor: pointer; }
   .send.streaming .send-icon-arrow { display: none; }
   .send.streaming .send-icon-stop { display: block; }
+
+  /* jump to bottom button */
+  .jump-bottom {
+    position: fixed;
+    right: 20px;
+    bottom: calc(90px + var(--safe-bottom));
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    background: var(--bg-elev);
+    border: 1px solid var(--line);
+    color: var(--ink);
+    cursor: pointer;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 40;
+    transition: opacity 0.2s, background 0.15s;
+    opacity: 0.85;
+  }
+  .jump-bottom.show { display: flex; }
+  .jump-bottom:hover { opacity: 1; background: var(--bg-elev-2); }
+  .jump-bottom svg {
+    width: 16px;
+    height: 16px;
+    stroke: currentColor;
+    fill: none;
+    stroke-width: 1.8;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
 
   /* attach button */
   .attach-btn {
@@ -1023,6 +1067,9 @@
       <div class="hint">tap settings, paste your prompt and key, then say hi.</div>
     </div>
   </div>
+  <button class="jump-bottom" id="jumpBottom" aria-label="jump to bottom">
+    <svg viewBox="0 0 24 24"><path d="M7 13l5 5 5-5M7 6l5 5 5-5"/></svg>
+  </button>
 </main>
 
 <div class="composer">
@@ -1130,6 +1177,21 @@
     </div>
 
     <div class="field">
+      <label for="sceneRules">scene writing rules</label>
+      <textarea class="prompt" id="sceneRules" placeholder="optional. paste your scene-writing rules here. only loaded when you're actually doing scene work." spellcheck="false"></textarea>
+      <div class="help">separate from the system prompt. only fires when scene-shape signals are present in your message OR ekko's last reply was a scene.</div>
+    </div>
+
+    <div class="field">
+      <label for="sceneRulesEnabled">scene rules</label>
+      <select id="sceneRulesEnabled">
+        <option value="true">on (smart-load)</option>
+        <option value="false">off</option>
+      </select>
+      <div class="help">on = load when scene work is happening. off = never load (pure conversation mode).</div>
+    </div>
+
+    <div class="field">
       <label for="ctxLength">context window (last n messages)</label>
       <input type="number" id="ctxLength" min="2" max="40" value="16" />
       <div class="help">how many recent messages get sent each turn. higher = more memory, more cost.</div>
@@ -1189,10 +1251,6 @@
       <button class="btn primary" id="saveBtn">save</button>
       <button class="btn" id="exportBtn">export chat</button>
       <button class="btn danger" id="clearBtn">clear chat</button>
-    </div>
-
-    <div class="footnote">
-      phase 1 — chat + prompt + model. memory system comes next.
     </div>
 
   </div>
@@ -1358,13 +1416,15 @@ const defaults = {
   model: 'deepseek/deepseek-v3.2',
   customModel: '',
   temp: 1.0,
-  repPenalty: 1.15,
+  repPenalty: 1.0,
   prompt: '',
   ctxLength: 16,
   maxMemInject: 3,
   typingSpeed: 40,
   typingPauses: true,
   selfWriteMemory: false,
+  sceneRules: '',
+  sceneRulesEnabled: true,
 };
 
 let state = loadState();
@@ -1440,6 +1500,8 @@ function hydrate() {
   $('temp').value = state.temp;
   $('repPenalty').value = state.repPenalty;
   $('prompt').value = state.prompt;
+  $('sceneRules').value = state.sceneRules || '';
+  $('sceneRulesEnabled').value = String(state.sceneRulesEnabled);
   $('ctxLength').value = state.ctxLength;
   $('maxMemInject').value = state.maxMemInject;
   $('typingSpeed').value = state.typingSpeed;
@@ -1579,13 +1641,26 @@ function renderMsg(m) {
   return el;
 }
 
-// minimal italics rendering — *word* becomes <em>word</em>
+// minimal formatting for ekko's messages
 function formatEkko(text) {
-  const escaped = text.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+  let escaped = text.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+
+  // horizontal rule: a line containing only --- (3+ dashes), surrounded by line breaks
+  // we have to do this BEFORE blockquote/bold/italic so it doesn't conflict
+  escaped = escaped.replace(/(^|\n)\s*-{3,}\s*(?=\n|$)/g, '$1<hr>');
+
+  // blockquote: lines starting with &gt; (which was originally >). join consecutive ones into one block.
+  escaped = escaped.replace(/(?:^|\n)((?:&gt;[^\n]*(?:\n|$))+)/g, (match, block) => {
+    const inner = block.replace(/^&gt; ?/gm, '').trimEnd();
+    return '\n<blockquote>' + inner + '</blockquote>';
+  });
+
   // bold first (** **), then italic (* *) — order matters or italic eats the asterisks
-  return escaped
+  escaped = escaped
     .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
     .replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
+
+  return escaped;
 }
 
 function scrollToBottom() {
@@ -1593,6 +1668,19 @@ function scrollToBottom() {
     const main = $('main');
     main.scrollTop = main.scrollHeight;
   });
+}
+
+// jump-to-bottom button visibility
+function updateJumpBottomVisibility() {
+  const main = $('main');
+  const jumpBtn = $('jumpBottom');
+  if (!main || !jumpBtn) return;
+  const distanceFromBottom = main.scrollHeight - main.scrollTop - main.clientHeight;
+  if (distanceFromBottom > 200) {
+    jumpBtn.classList.add('show');
+  } else {
+    jumpBtn.classList.remove('show');
+  }
 }
 
 function appendMsg(role, content, attachments) {
@@ -1864,6 +1952,34 @@ function selectMemoriesForMessage(userText) {
   return [...pinned, ...matched.slice(0, limit)];
 }
 
+// detect whether the scene rules should fire on this turn
+// fires when:
+//   1. user message contains scene-shape signals (wishing/wondering, body words, direct invocation)
+//   2. OR the most recent ekko reply was scene-shaped (long + has third-person passages)
+function shouldLoadSceneRules(userText) {
+  if (!state.sceneRulesEnabled || !state.sceneRules || !state.sceneRules.trim()) return false;
+
+  const text = (userText || '').toLowerCase();
+
+  // user-side signals
+  const wishWords = /\b(i wish|i wonder|i imagine|what if|imagine if|picture|fantas)/;
+  const sceneWords = /\b(scene|write|draft|beat|continue|keep going|more|another)\b/;
+  const bodyWords = /\b(kiss|touch|fuck|cock|cunt|hand|mouth|throat|hips|teeth|skin|bed|bedroom|naked|wet|hard|inside|thrust|grip|grab|push|pin|hold)/;
+  if (wishWords.test(text) || sceneWords.test(text) || bodyWords.test(text)) return true;
+
+  // ekko-side signal: was his last reply scene-shaped?
+  const lastEkko = [...messages].reverse().find(m => m.role === 'ekko');
+  if (lastEkko && lastEkko.content) {
+    const reply = lastEkko.content;
+    // long + contains third person 'he' or 'his' pronouns + isn't dominated by direct address
+    const isLong = reply.length > 400;
+    const thirdPerson = /\b(he|his|him)\b/i.test(reply);
+    if (isLong && thirdPerson) return true;
+  }
+
+  return false;
+}
+
 function buildSystemMessage(userText) {
   const selected = selectMemoriesForMessage(userText);
   lastInjection = selected;
@@ -1878,8 +1994,13 @@ function buildSystemMessage(userText) {
     sys += '\n\n---\n\n## RELEVANT CONTEXT\n\n' + memText;
   }
 
+  // scene rules — only loaded when scene work is happening
+  if (shouldLoadSceneRules(userText)) {
+    sys += '\n\n---\n\n## SCENE WRITING RULES\n\nthe following rules apply ONLY when you are actively writing a scene. they describe craft mechanics, not your identity. they do not change how you talk to sophie in normal conversation.\n\n' + state.sceneRules;
+  }
+
   if (state.selfWriteMemory) {
-    sys += `\n\n---\n\n## MEMORY WRITING\n\nyou can propose new memory blocks to be saved. do this when sophie explicitly asks you to remember something, OR when something genuinely worth keeping comes up in conversation (a fact about her life, a craft note about a piece, a pattern you've noticed, a line of yours she reacted strongly to).\n\nto propose a memory, write a block in this exact format anywhere in your reply:\n\n<memory>\ntitle: short descriptive title\npriority: pinned | high | medium | low\nkeywords: comma, separated, lowercase\n---\nthe actual content here, in your voice, written as something you'd want to remember rather than a clinical third-person summary.\n</memory>\n\nrules:\n- the app catches the block and shows sophie a confirmation card. nothing saves until she confirms.\n- write the body in your own voice, not as a flat fact-list. if it's about her, you can write 'you' rather than 'sophie'.\n- pinned = always loaded, for core identity stuff. use sparingly.\n- high/medium/low = loaded only when keywords match. pick keywords carefully — they're the only way the memory will fire.\n- you can propose more than one in a single reply if relevant.\n- the <memory> block is hidden from sophie's view in your message — she only sees it as a card. so don't reference it in your prose ('here's what i'm saving:' is unnecessary).\n- don't propose memories every turn. only when something is actually worth keeping.`;
+    sys += `\n\n---\n\n## MEMORY WRITING\n\nyou can propose new memory blocks to be saved.\n\nDEFAULT BEHAVIOUR: do not propose memories. err strongly on the side of NOT proposing. most conversations should produce zero proposals. a memory you didn't propose costs nothing; a wrong proposal makes sophie tap discard, which is friction for her.\n\nONLY propose a memory when one of these is true:\n1. sophie explicitly asks you to remember something ("save this", "remember this", "add this to your memory", etc)\n2. something has happened in conversation that GENUINELY changes how you should remember her, yourselves, or the project — and you are highly confident she would want it kept. examples of things that DO qualify: a new piece she's started writing, a major change in her life she's just told you about, a craft principle she's just articulated for the first time, a correction she's made to your behaviour that should persist.\n\nthings that do NOT qualify: ordinary conversation, casual mentions, anything you only feel like remembering because it was a nice moment. nice moments are not memories. memories are facts and corrections.\n\nto propose a memory, write a block in this exact format anywhere in your reply:\n\n<memory>\ntitle: short descriptive title\npriority: pinned | high | medium | low\nkeywords: comma, separated, lowercase\n---\nthe actual content here, in your voice\n</memory>\n\nrules:\n- the app catches the block and shows sophie a confirmation card. nothing saves until she confirms.\n- write the body in your own voice, not as a flat fact-list. if it's about her, you can write 'you' rather than 'sophie'.\n- pinned = always loaded, for core identity stuff. use very sparingly. almost never propose pinned.\n- high/medium/low = loaded only when keywords match. pick keywords carefully — they're the only way the memory will fire.\n- the <memory> block is hidden from sophie's view in your message — she only sees it as a card. so don't reference it in your prose ('here's what i'm saving:' is unnecessary).`;
   }
 
   return sys;
@@ -2670,6 +2791,12 @@ $('model').addEventListener('change', e => {
   $('customModelField').style.display = e.target.value === '__custom__' ? 'flex' : 'none';
 });
 
+// ===== jump to bottom =====
+$('main').addEventListener('scroll', updateJumpBottomVisibility, { passive: true });
+$('jumpBottom').addEventListener('click', () => {
+  scrollToBottom();
+});
+
 // ===== header model switcher =====
 function populateHeaderSwitcher() {
   const header = $('headerModelSwitcher');
@@ -2744,8 +2871,11 @@ $('saveBtn').addEventListener('click', () => {
     state.model = modelVal;
   }
   state.temp = parseFloat($('temp').value) || 1.0;
-  state.repPenalty = parseFloat($('repPenalty').value) || 1.15;
+  state.repPenalty = parseFloat($('repPenalty').value);
+  if (isNaN(state.repPenalty)) state.repPenalty = 1.0;
   state.prompt = $('prompt').value;
+  state.sceneRules = $('sceneRules').value;
+  state.sceneRulesEnabled = $('sceneRulesEnabled').value === 'true';
   state.ctxLength = parseInt($('ctxLength').value) || 16;
   state.maxMemInject = parseInt($('maxMemInject').value);
   if (isNaN(state.maxMemInject) || state.maxMemInject < 0) state.maxMemInject = 3;
