@@ -298,6 +298,82 @@
     cursor: not-allowed;
   }
   .send svg { width: 16px; height: 16px; fill: currentColor; }
+  .send .send-icon-stop { display: none; }
+  .send.streaming { background: var(--ink); cursor: pointer; }
+  .send.streaming:disabled { background: var(--ink); cursor: pointer; }
+  .send.streaming .send-icon-arrow { display: none; }
+  .send.streaming .send-icon-stop { display: block; }
+
+  /* attach button */
+  .attach-btn {
+    background: none;
+    border: none;
+    color: var(--ink-dim);
+    cursor: pointer;
+    width: 32px;
+    height: 32px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    align-self: flex-end;
+    transition: color 0.2s;
+    padding: 0;
+  }
+  .attach-btn:hover { color: var(--ink); }
+  .attach-btn svg {
+    width: 18px;
+    height: 18px;
+    stroke: currentColor;
+    fill: none;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  /* attached file chips */
+  .attached-files {
+    max-width: 720px;
+    margin: 8px auto 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .attached-files:empty { display: none; }
+  .file-chip {
+    background: var(--bg-elev);
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    padding: 6px 10px 6px 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12px;
+    color: var(--ink);
+    max-width: 240px;
+  }
+  .file-chip-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .file-chip-size {
+    color: var(--ink-dimmer);
+    font-size: 11px;
+    flex-shrink: 0;
+  }
+  .file-chip-remove {
+    background: none;
+    border: none;
+    color: var(--ink-dim);
+    cursor: pointer;
+    padding: 2px;
+    display: flex;
+    align-items: center;
+    flex-shrink: 0;
+  }
+  .file-chip-remove:hover { color: var(--ink); }
+  .file-chip-remove svg { width: 12px; height: 12px; stroke: currentColor; fill: none; stroke-width: 2; }
 
   /* ===== SETTINGS DRAWER ===== */
   .scrim {
@@ -908,11 +984,17 @@
 
 <div class="composer">
   <div class="composer-inner">
+    <button class="attach-btn" id="attachBtn" aria-label="attach text file" title="attach .txt file">
+      <svg viewBox="0 0 24 24"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+    </button>
+    <input type="file" id="fileInput" accept=".txt,text/plain" multiple style="display:none;" />
     <textarea id="input" rows="1" placeholder="Message Ekko" autocomplete="off"></textarea>
     <button class="send" id="sendBtn" disabled aria-label="send">
-      <svg viewBox="0 0 24 24"><path d="M12 4l-1.4 1.4 5.6 5.6H4v2h12.2l-5.6 5.6L12 20l8-8z"/></svg>
+      <svg class="send-icon-arrow" viewBox="0 0 24 24"><path d="M12 4l-1.4 1.4 5.6 5.6H4v2h12.2l-5.6 5.6L12 20l8-8z"/></svg>
+      <svg class="send-icon-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
     </button>
   </div>
+  <div class="attached-files" id="attachedFiles"></div>
 </div>
 
 <!-- ===== SETTINGS DRAWER ===== -->
@@ -1248,6 +1330,9 @@ let memories = loadMemories();
 let lastInjection = []; // {memory, reason} per injected block from last turn
 let editingMemId = null;
 let isStreaming = false;
+let currentAbortController = null;
+let currentAbortFn = null;
+let attachedFiles = []; // {name, size, content}
 
 // ============================================================
 // PERSISTENCE
@@ -2042,7 +2127,8 @@ function sleep(ms) {
 
 async function sendMessage() {
   const text = inputEl.value.trim();
-  if (!text || isStreaming) return;
+  // allow sending if there's text OR attachments (or both), but not if streaming
+  if ((!text && attachedFiles.length === 0) || isStreaming) return;
 
   if (!state.apiKey) {
     showToast('add your openrouter key in settings', true);
@@ -2055,17 +2141,27 @@ async function sendMessage() {
     return;
   }
 
+  // build the full message including any attached files
+  const messageContent = buildMessageWithAttachments(text);
+
   inputEl.value = '';
   autoResize();
-  appendMsg('user', text);
+  // clear attachments AFTER building the message
+  clearAttachedFiles();
+  appendMsg('user', messageContent);
   // re-render so action buttons attach to the new last user message
   // and the previous one's buttons get removed
   render();
 
   isStreaming = true;
   statusDot.classList.remove('idle');
-  sendBtn.disabled = true;
+  sendBtn.disabled = false;
+  sendBtn.classList.add('streaming');
+  sendBtn.setAttribute('aria-label', 'stop');
   showTyping();
+
+  // set up abort controller for this request
+  currentAbortController = new AbortController();
 
   // build payload
   const recent = messages.slice(-state.ctxLength).map(m => ({
@@ -2094,6 +2190,15 @@ async function sendMessage() {
   let apiDone = false;     // true when the fetch stream has ended
   let aborted = false;
   let bubbleCreated = false;
+
+  // expose an abort function so the send button (now acting as stop) can call it
+  currentAbortFn = () => {
+    aborted = true;
+    apiDone = true;
+    if (currentAbortController) {
+      try { currentAbortController.abort(); } catch (e) {}
+    }
+  };
 
   function ensureBubble() {
     if (bubbleCreated) return;
@@ -2187,6 +2292,7 @@ async function sendMessage() {
         'X-Title': 'ekko',
       },
       body: JSON.stringify(payload),
+      signal: currentAbortController.signal,
     });
 
     if (!res.ok) {
@@ -2261,16 +2367,46 @@ async function sendMessage() {
     }
 
   } catch (err) {
-    aborted = true;
-    apiDone = true;
-    removeTyping();
-    if (streamEl) streamEl.remove();
-    appendMsg('system', '— error: ' + err.message + ' —');
-    showToast('error — check settings', true);
+    // distinguish abort from real errors
+    const isAbort = err.name === 'AbortError' || aborted;
+    if (isAbort) {
+      // user stopped it. save whatever was already buffered as a partial message.
+      apiDone = true;
+      // give the painter a moment to drain anything still pending
+      // (it'll exit on its own because aborted is set)
+      removeTyping();
+      if (bufferedText.length > 0) {
+        const { cleanText, proposals } = parseMemoryProposals(bufferedText);
+        if (streamBody) {
+          streamBody.innerHTML = formatEkko(cleanText) + '<span style="color: var(--ink-dimmer); font-size: 11px; font-style: italic;"> — stopped</span>';
+        }
+        const msgRecord = { role: 'ekko', content: cleanText };
+        if (proposals.length > 0) msgRecord.proposals = proposals;
+        messages.push(msgRecord);
+        saveMessages();
+        if (proposals.length > 0 && streamEl) {
+          for (const p of proposals) renderPendingMemoryCard(p, streamEl);
+          scrollToBottom();
+        }
+      } else if (streamEl) {
+        streamEl.remove();
+      }
+    } else {
+      aborted = true;
+      apiDone = true;
+      removeTyping();
+      if (streamEl) streamEl.remove();
+      appendMsg('system', '— error: ' + err.message + ' —');
+      showToast('error — check settings', true);
+    }
   } finally {
     isStreaming = false;
     statusDot.classList.add('idle');
+    sendBtn.classList.remove('streaming');
+    sendBtn.setAttribute('aria-label', 'send');
     sendBtn.disabled = inputEl.value.trim().length === 0;
+    currentAbortController = null;
+    currentAbortFn = null;
     inputEl.focus();
     // re-render to attach action buttons to the new last messages
     render();
@@ -2284,8 +2420,94 @@ function autoResize() {
   inputEl.style.height = 'auto';
   inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
 }
+
+// ===== file attachment =====
+const MAX_FILE_SIZE = 500 * 1024; // 500KB per file
+const MAX_TOTAL_FILE_SIZE = 1024 * 1024; // 1MB total
+
+function formatFileSize(bytes) {
+  if (bytes < 1024) return bytes + 'b';
+  if (bytes < 1024 * 1024) return Math.round(bytes / 1024) + 'kb';
+  return (bytes / 1024 / 1024).toFixed(1) + 'mb';
+}
+
+function renderAttachedFiles() {
+  const container = $('attachedFiles');
+  container.innerHTML = '';
+  attachedFiles.forEach((file, idx) => {
+    const chip = document.createElement('div');
+    chip.className = 'file-chip';
+    chip.innerHTML = `
+      <span class="file-chip-name"></span>
+      <span class="file-chip-size"></span>
+      <button class="file-chip-remove" aria-label="remove">
+        <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
+      </button>
+    `;
+    chip.querySelector('.file-chip-name').textContent = file.name;
+    chip.querySelector('.file-chip-size').textContent = formatFileSize(file.size);
+    chip.querySelector('.file-chip-remove').addEventListener('click', () => {
+      attachedFiles.splice(idx, 1);
+      renderAttachedFiles();
+    });
+    container.appendChild(chip);
+  });
+}
+
+async function handleFileSelection(fileList) {
+  const files = Array.from(fileList);
+  for (const file of files) {
+    // size check
+    if (file.size > MAX_FILE_SIZE) {
+      showToast(`${file.name} is too big (max 500kb)`, true);
+      continue;
+    }
+    // total size check
+    const currentTotal = attachedFiles.reduce((sum, f) => sum + f.size, 0);
+    if (currentTotal + file.size > MAX_TOTAL_FILE_SIZE) {
+      showToast('total attachment size exceeds 1mb', true);
+      break;
+    }
+    // type check (lenient — accept anything that looks like text)
+    if (file.type && !file.type.startsWith('text/') && !file.name.match(/\.(txt|md|csv|json|log|html|xml|yaml|yml)$/i)) {
+      showToast(`${file.name} is not a text file`, true);
+      continue;
+    }
+    try {
+      const content = await file.text();
+      attachedFiles.push({
+        name: file.name,
+        size: file.size,
+        content,
+      });
+    } catch (err) {
+      showToast(`couldn't read ${file.name}`, true);
+    }
+  }
+  renderAttachedFiles();
+}
+
+function clearAttachedFiles() {
+  attachedFiles = [];
+  renderAttachedFiles();
+}
+
+function buildMessageWithAttachments(text) {
+  if (attachedFiles.length === 0) return text;
+  const fileBlocks = attachedFiles
+    .map(f => `[file: ${f.name}]\n${f.content}\n[/file]`)
+    .join('\n\n');
+  // attachments first, then the user's text
+  return text ? `${fileBlocks}\n\n${text}` : fileBlocks;
+}
 inputEl.addEventListener('input', () => {
-  sendBtn.disabled = inputEl.value.trim().length === 0 || isStreaming;
+  // when streaming, the button is the stop button — always clickable.
+  // when not streaming, it's the send button — disabled if input AND attachments are both empty.
+  if (isStreaming) {
+    sendBtn.disabled = false;
+  } else {
+    sendBtn.disabled = inputEl.value.trim().length === 0 && attachedFiles.length === 0;
+  }
   autoResize();
 });
 inputEl.addEventListener('keydown', e => {
@@ -2296,7 +2518,27 @@ inputEl.addEventListener('keydown', e => {
     sendMessage();
   }
 });
-sendBtn.addEventListener('click', sendMessage);
+sendBtn.addEventListener('click', () => {
+  if (isStreaming && currentAbortFn) {
+    currentAbortFn();
+  } else {
+    sendMessage();
+  }
+});
+
+// attach file button
+$('attachBtn').addEventListener('click', () => {
+  if (isStreaming) return;
+  $('fileInput').click();
+});
+$('fileInput').addEventListener('change', async e => {
+  await handleFileSelection(e.target.files);
+  e.target.value = ''; // reset so selecting the same file again still fires
+  // enable send button if we now have attachments even with empty input
+  if (!isStreaming) {
+    sendBtn.disabled = inputEl.value.trim().length === 0 && attachedFiles.length === 0;
+  }
+});
 
 // drawer
 function openDrawer() {
