@@ -375,6 +375,49 @@
   .file-chip-remove:hover { color: var(--ink); }
   .file-chip-remove svg { width: 12px; height: 12px; stroke: currentColor; fill: none; stroke-width: 2; }
 
+  /* file chips inside message bubbles (after sending) */
+  .msg-attachments {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 6px;
+    align-self: flex-end;
+    max-width: 78%;
+  }
+  .msg-file-chip {
+    background: var(--user-bg);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 8px 12px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--ink);
+    max-width: 100%;
+  }
+  .msg-file-chip svg {
+    width: 14px;
+    height: 14px;
+    stroke: var(--ink-dim);
+    fill: none;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    flex-shrink: 0;
+  }
+  .msg-file-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 200px;
+  }
+  .msg-file-size {
+    color: var(--ink-dimmer);
+    font-size: 11px;
+    flex-shrink: 0;
+  }
+
   /* ===== SETTINGS DRAWER ===== */
   .scrim {
     position: fixed;
@@ -1416,46 +1459,63 @@ function render() {
     chatEl.appendChild(emptyEl);
     return;
   }
-  // find indices of last user and last ekko messages so we can attach action buttons
-  let lastUserIdx = -1, lastEkkoIdx = -1;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (lastUserIdx === -1 && messages[i].role === 'user') lastUserIdx = i;
-    if (lastEkkoIdx === -1 && messages[i].role === 'ekko') lastEkkoIdx = i;
-    if (lastUserIdx !== -1 && lastEkkoIdx !== -1) break;
-  }
   messages.forEach((m, i) => {
     const el = renderMsg(m);
-    if (i === lastUserIdx) attachUserActions(el);
-    if (i === lastEkkoIdx) attachEkkoActions(el);
+    if (m.role === 'user') attachUserActions(el, i);
+    else if (m.role === 'ekko') attachEkkoActions(el, i);
     chatEl.appendChild(el);
   });
   scrollToBottom();
 }
 
-function attachUserActions(el) {
+function attachUserActions(el, idx) {
   const row = document.createElement('div');
   row.className = 'msg-actions';
   row.innerHTML = `
-    <button class="msg-action-btn" title="edit">
+    <button class="msg-action-btn" data-action="edit" title="edit">
       <svg viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
       edit
     </button>
+    <button class="msg-action-btn" data-action="copy" title="copy">
+      <svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+      copy
+    </button>
   `;
-  row.querySelector('button').addEventListener('click', editLastUserMessage);
+  row.querySelector('[data-action="edit"]').addEventListener('click', () => editUserMessageAt(idx));
+  row.querySelector('[data-action="copy"]').addEventListener('click', e => copyMessageContent(idx, e.currentTarget));
   el.appendChild(row);
 }
 
-function attachEkkoActions(el) {
+function attachEkkoActions(el, idx) {
   const row = document.createElement('div');
   row.className = 'msg-actions';
   row.innerHTML = `
-    <button class="msg-action-btn" title="regenerate">
+    <button class="msg-action-btn" data-action="regenerate" title="regenerate">
       <svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
       regenerate
     </button>
+    <button class="msg-action-btn" data-action="copy" title="copy">
+      <svg viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+      copy
+    </button>
   `;
-  row.querySelector('button').addEventListener('click', regenerateLastEkkoMessage);
+  row.querySelector('[data-action="regenerate"]').addEventListener('click', () => regenerateEkkoMessageAt(idx));
+  row.querySelector('[data-action="copy"]').addEventListener('click', e => copyMessageContent(idx, e.currentTarget));
   el.appendChild(row);
+}
+
+async function copyMessageContent(idx, btn) {
+  const m = messages[idx];
+  if (!m) return;
+  try {
+    await navigator.clipboard.writeText(m.content || '');
+    // visual feedback — temporarily change the button text
+    const original = btn.innerHTML;
+    btn.innerHTML = btn.innerHTML.replace('copy', 'copied');
+    setTimeout(() => { btn.innerHTML = original; }, 1200);
+  } catch (err) {
+    showToast('copy failed', true);
+  }
 }
 
 function renderMsg(m) {
@@ -1465,14 +1525,37 @@ function renderMsg(m) {
     el.textContent = m.content;
     return el;
   }
-  const body = document.createElement('div');
-  body.className = 'body';
-  if (m.role === 'ekko') {
-    body.innerHTML = formatEkko(m.content);
-  } else {
-    body.textContent = m.content;
+
+  // attachment chips (for user messages with files attached)
+  if (m.role === 'user' && Array.isArray(m.attachments) && m.attachments.length > 0) {
+    const attachRow = document.createElement('div');
+    attachRow.className = 'msg-attachments';
+    for (const att of m.attachments) {
+      const chip = document.createElement('div');
+      chip.className = 'msg-file-chip';
+      chip.innerHTML = `
+        <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+        <span class="msg-file-name"></span>
+        <span class="msg-file-size"></span>
+      `;
+      chip.querySelector('.msg-file-name').textContent = att.name;
+      chip.querySelector('.msg-file-size').textContent = formatFileSize(att.size);
+      attachRow.appendChild(chip);
+    }
+    el.appendChild(attachRow);
   }
-  el.appendChild(body);
+
+  // body text (omit if empty — happens when user sends just an attachment with no text)
+  if (m.content && m.content.trim().length > 0) {
+    const body = document.createElement('div');
+    body.className = 'body';
+    if (m.role === 'ekko') {
+      body.innerHTML = formatEkko(m.content);
+    } else {
+      body.textContent = m.content;
+    }
+    el.appendChild(body);
+  }
 
   // re-render any persisted memory proposals from this message
   if (m.role === 'ekko' && Array.isArray(m.proposals)) {
@@ -1487,7 +1570,6 @@ function renderMsg(m) {
           if (label) {
             label.textContent = `${p.resolved}: ${p.title}`;
           }
-          // disable the buttons since they've been used
           lastCard.querySelectorAll('button').forEach(b => b.disabled = true);
         }
       }
@@ -1513,11 +1595,13 @@ function scrollToBottom() {
   });
 }
 
-function appendMsg(role, content) {
-  messages.push({ role, content });
+function appendMsg(role, content, attachments) {
+  const msg = { role, content };
+  if (attachments && attachments.length > 0) msg.attachments = attachments;
+  messages.push(msg);
   saveMessages();
   if (emptyEl.parentNode) emptyEl.remove();
-  const el = renderMsg({ role, content });
+  const el = renderMsg(msg);
   chatEl.appendChild(el);
   scrollToBottom();
   return el;
@@ -1549,49 +1633,69 @@ function showToast(msg, isError = false) {
 
 // edit your last message: drop the last user message + everything after,
 // re-populate the input with its content so you can revise and re-send
-function editLastUserMessage() {
+function editUserMessageAt(idx) {
   if (isStreaming) { showToast('wait for the message to finish', true); return; }
-  // find the last user message index
-  let lastUserIdx = -1;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === 'user') { lastUserIdx = i; break; }
+  const prev = messages[idx];
+  if (!prev || prev.role !== 'user') { showToast('nothing to edit'); return; }
+  // confirm if there are messages after this one that will be lost
+  const willLose = messages.length - idx - 1;
+  if (willLose > 0) {
+    const ok = confirm(`editing this will delete the ${willLose} message${willLose === 1 ? '' : 's'} that came after. continue?`);
+    if (!ok) return;
   }
-  if (lastUserIdx === -1) { showToast('nothing to edit'); return; }
-  const prev = messages[lastUserIdx];
+  // restore any attachments back to the composer too
+  if (Array.isArray(prev.attachments) && prev.attachments.length > 0) {
+    attachedFiles = prev.attachments.map(a => ({
+      name: a.name,
+      size: a.size,
+      content: a.content,
+    }));
+    renderAttachedFiles();
+  }
   // truncate the conversation back to before this message
-  messages = messages.slice(0, lastUserIdx);
+  messages = messages.slice(0, idx);
   saveMessages();
   render();
-  // populate the input
-  inputEl.value = prev.content;
+  // populate the input with just the typed text
+  inputEl.value = prev.content || '';
   autoResize();
   inputEl.focus();
   // move cursor to end
   inputEl.setSelectionRange(inputEl.value.length, inputEl.value.length);
 }
 
-// regenerate the last ekko reply: drop it, re-send the user message that produced it
-function regenerateLastEkkoMessage() {
+// regenerate any ekko message: drop it (and everything after), re-send the user message that produced it
+function regenerateEkkoMessageAt(idx) {
   if (isStreaming) { showToast('wait for the message to finish', true); return; }
-  // find the last ekko message
-  let lastEkkoIdx = -1;
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === 'ekko') { lastEkkoIdx = i; break; }
-  }
-  if (lastEkkoIdx === -1) { showToast('nothing to regenerate'); return; }
+  const target = messages[idx];
+  if (!target || target.role !== 'ekko') { showToast('nothing to regenerate'); return; }
   // find the user message immediately before it
   let userIdx = -1;
-  for (let i = lastEkkoIdx - 1; i >= 0; i--) {
+  for (let i = idx - 1; i >= 0; i--) {
     if (messages[i].role === 'user') { userIdx = i; break; }
   }
   if (userIdx === -1) { showToast('no user message to regenerate from', true); return; }
+  // confirm if there are messages after this one that will be lost
+  const willLose = messages.length - idx - 1;
+  if (willLose > 0) {
+    const ok = confirm(`regenerating this will delete the ${willLose} message${willLose === 1 ? '' : 's'} that came after. continue?`);
+    if (!ok) return;
+  }
   const userMsg = messages[userIdx];
+  // restore the user message's attachments to the composer so sendMessage uses them again
+  if (Array.isArray(userMsg.attachments) && userMsg.attachments.length > 0) {
+    attachedFiles = userMsg.attachments.map(a => ({
+      name: a.name,
+      size: a.size,
+      content: a.content,
+    }));
+  }
   // truncate back to just before the user message
   messages = messages.slice(0, userIdx);
   saveMessages();
   render();
   // re-send by populating the input and triggering send
-  inputEl.value = userMsg.content;
+  inputEl.value = userMsg.content || '';
   sendMessage();
 }
 
@@ -2141,14 +2245,18 @@ async function sendMessage() {
     return;
   }
 
-  // build the full message including any attached files
-  const messageContent = buildMessageWithAttachments(text);
+  // snapshot the attachments before clearing the composer
+  const attachmentsForMessage = attachedFiles.map(f => ({
+    name: f.name,
+    size: f.size,
+    content: f.content,
+  }));
 
   inputEl.value = '';
   autoResize();
-  // clear attachments AFTER building the message
   clearAttachedFiles();
-  appendMsg('user', messageContent);
+  // store the user's typed text and attachments separately on the message record
+  appendMsg('user', text, attachmentsForMessage);
   // re-render so action buttons attach to the new last user message
   // and the previous one's buttons get removed
   render();
@@ -2163,11 +2271,22 @@ async function sendMessage() {
   // set up abort controller for this request
   currentAbortController = new AbortController();
 
-  // build payload
-  const recent = messages.slice(-state.ctxLength).map(m => ({
-    role: m.role === 'ekko' ? 'assistant' : (m.role === 'user' ? 'user' : 'system'),
-    content: m.content,
-  }));
+  // build payload — for the API, we DO need to combine text + attachments into a single string,
+  // because the model can only see what's in `content`. but the chat history stores them separately
+  // so the visible bubble stays clean.
+  const recent = messages.slice(-state.ctxLength).map(m => {
+    let content = m.content;
+    if (m.role === 'user' && Array.isArray(m.attachments) && m.attachments.length > 0) {
+      const fileBlocks = m.attachments
+        .map(f => `[file: ${f.name}]\n${f.content}\n[/file]`)
+        .join('\n\n');
+      content = content ? `${fileBlocks}\n\n${content}` : fileBlocks;
+    }
+    return {
+      role: m.role === 'ekko' ? 'assistant' : (m.role === 'user' ? 'user' : 'system'),
+      content,
+    };
+  });
 
   const systemContent = buildSystemMessage(text);
 
@@ -2490,15 +2609,6 @@ async function handleFileSelection(fileList) {
 function clearAttachedFiles() {
   attachedFiles = [];
   renderAttachedFiles();
-}
-
-function buildMessageWithAttachments(text) {
-  if (attachedFiles.length === 0) return text;
-  const fileBlocks = attachedFiles
-    .map(f => `[file: ${f.name}]\n${f.content}\n[/file]`)
-    .join('\n\n');
-  // attachments first, then the user's text
-  return text ? `${fileBlocks}\n\n${text}` : fileBlocks;
 }
 inputEl.addEventListener('input', () => {
   // when streaming, the button is the stop button — always clickable.
@@ -2838,13 +2948,14 @@ async function fetchCloudSettings() {
 
 async function fetchCloudMessages() {
   const { data, error } = await sb.from('messages')
-    .select('id, position, role, content, proposals')
+    .select('id, position, role, content, proposals, attachments')
     .eq('user_id', currentUser.id)
     .order('position', { ascending: true });
   if (error) throw error;
   return (data || []).map(row => {
     const m = { role: row.role, content: row.content };
     if (row.proposals) m.proposals = row.proposals;
+    if (row.attachments) m.attachments = row.attachments;
     return m;
   });
 }
@@ -2887,6 +2998,7 @@ async function pushMessagesToCloud(msgs) {
     role: m.role,
     content: m.content,
     proposals: m.proposals || null,
+    attachments: m.attachments || null,
   }));
   const { error } = await sb.from('messages').insert(rows);
   if (error) throw error;
