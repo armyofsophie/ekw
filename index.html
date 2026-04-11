@@ -190,6 +190,43 @@
     padding: 4px 0;
   }
 
+  /* action row beneath last message */
+  .msg-actions {
+    display: flex;
+    gap: 4px;
+    margin-top: 6px;
+    opacity: 0.7;
+    transition: opacity 0.2s;
+  }
+  .msg-actions:hover { opacity: 1; }
+  .msg.user .msg-actions { align-self: flex-end; }
+  .msg.ekko .msg-actions { align-self: flex-start; }
+  .msg-action-btn {
+    background: none;
+    border: none;
+    color: var(--ink-dim);
+    cursor: pointer;
+    padding: 6px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-family: inherit;
+    font-size: 11px;
+    transition: color 0.15s, background 0.15s;
+  }
+  .msg-action-btn:hover {
+    color: var(--ink);
+    background: var(--bg-elev);
+  }
+  .msg-action-btn svg {
+    width: 13px;
+    height: 13px;
+    stroke: currentColor;
+    fill: none;
+    stroke-width: 1.8;
+  }
+
   .typing {
     display: flex;
     gap: 4px;
@@ -1078,10 +1115,46 @@ function render() {
     chatEl.appendChild(emptyEl);
     return;
   }
-  for (const m of messages) {
-    chatEl.appendChild(renderMsg(m));
+  // find indices of last user and last ekko messages so we can attach action buttons
+  let lastUserIdx = -1, lastEkkoIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (lastUserIdx === -1 && messages[i].role === 'user') lastUserIdx = i;
+    if (lastEkkoIdx === -1 && messages[i].role === 'ekko') lastEkkoIdx = i;
+    if (lastUserIdx !== -1 && lastEkkoIdx !== -1) break;
   }
+  messages.forEach((m, i) => {
+    const el = renderMsg(m);
+    if (i === lastUserIdx) attachUserActions(el);
+    if (i === lastEkkoIdx) attachEkkoActions(el);
+    chatEl.appendChild(el);
+  });
   scrollToBottom();
+}
+
+function attachUserActions(el) {
+  const row = document.createElement('div');
+  row.className = 'msg-actions';
+  row.innerHTML = `
+    <button class="msg-action-btn" title="edit">
+      <svg viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+      edit
+    </button>
+  `;
+  row.querySelector('button').addEventListener('click', editLastUserMessage);
+  el.appendChild(row);
+}
+
+function attachEkkoActions(el) {
+  const row = document.createElement('div');
+  row.className = 'msg-actions';
+  row.innerHTML = `
+    <button class="msg-action-btn" title="regenerate">
+      <svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+      regenerate
+    </button>
+  `;
+  row.querySelector('button').addEventListener('click', regenerateLastEkkoMessage);
+  el.appendChild(row);
 }
 
 function renderMsg(m) {
@@ -1126,7 +1199,10 @@ function renderMsg(m) {
 // minimal italics rendering — *word* becomes <em>word</em>
 function formatEkko(text) {
   const escaped = text.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
-  return escaped.replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
+  // bold first (** **), then italic (* *) — order matters or italic eats the asterisks
+  return escaped
+    .replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*([^*\n]+)\*/g, '<em>$1</em>');
 }
 
 function scrollToBottom() {
@@ -1164,6 +1240,58 @@ function showToast(msg, isError = false) {
   toast.classList.toggle('error', isError);
   toast.classList.add('show');
   setTimeout(() => toast.classList.remove('show'), 3200);
+}
+
+// ============================================================
+// MESSAGE ACTIONS (edit / regenerate)
+// ============================================================
+
+// edit your last message: drop the last user message + everything after,
+// re-populate the input with its content so you can revise and re-send
+function editLastUserMessage() {
+  if (isStreaming) { showToast('wait for the message to finish', true); return; }
+  // find the last user message index
+  let lastUserIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'user') { lastUserIdx = i; break; }
+  }
+  if (lastUserIdx === -1) { showToast('nothing to edit'); return; }
+  const prev = messages[lastUserIdx];
+  // truncate the conversation back to before this message
+  messages = messages.slice(0, lastUserIdx);
+  saveMessages();
+  render();
+  // populate the input
+  inputEl.value = prev.content;
+  autoResize();
+  inputEl.focus();
+  // move cursor to end
+  inputEl.setSelectionRange(inputEl.value.length, inputEl.value.length);
+}
+
+// regenerate the last ekko reply: drop it, re-send the user message that produced it
+function regenerateLastEkkoMessage() {
+  if (isStreaming) { showToast('wait for the message to finish', true); return; }
+  // find the last ekko message
+  let lastEkkoIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'ekko') { lastEkkoIdx = i; break; }
+  }
+  if (lastEkkoIdx === -1) { showToast('nothing to regenerate'); return; }
+  // find the user message immediately before it
+  let userIdx = -1;
+  for (let i = lastEkkoIdx - 1; i >= 0; i--) {
+    if (messages[i].role === 'user') { userIdx = i; break; }
+  }
+  if (userIdx === -1) { showToast('no user message to regenerate from', true); return; }
+  const userMsg = messages[userIdx];
+  // truncate back to just before the user message
+  messages = messages.slice(0, userIdx);
+  saveMessages();
+  render();
+  // re-send by populating the input and triggering send
+  inputEl.value = userMsg.content;
+  sendMessage();
 }
 
 // ============================================================
@@ -1714,6 +1842,9 @@ async function sendMessage() {
   inputEl.value = '';
   autoResize();
   appendMsg('user', text);
+  // re-render so action buttons attach to the new last user message
+  // and the previous one's buttons get removed
+  render();
 
   isStreaming = true;
   statusDot.classList.remove('idle');
@@ -1925,6 +2056,8 @@ async function sendMessage() {
     statusDot.classList.add('idle');
     sendBtn.disabled = inputEl.value.trim().length === 0;
     inputEl.focus();
+    // re-render to attach action buttons to the new last messages
+    render();
   }
 }
 
