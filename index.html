@@ -7,6 +7,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="theme-color" content="#0a0a0a" />
 <title>ekko</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
   :root {
     --bg: #000000;
@@ -631,6 +632,122 @@
   .mem-indicator.show { display: inline-flex; align-items: center; gap: 4px; }
   .mem-indicator:hover { color: var(--ink); border-color: var(--ink-dim); }
 
+  /* ===== AUTH SCREEN ===== */
+  .auth-screen {
+    position: fixed;
+    inset: 0;
+    background: var(--bg);
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 32px 24px;
+    z-index: 200;
+    padding-top: calc(40px + var(--safe-top));
+    padding-bottom: calc(40px + var(--safe-bottom));
+  }
+  .auth-screen.show { display: flex; }
+  .auth-card {
+    width: 100%;
+    max-width: 360px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+  .auth-title {
+    font-size: 28px;
+    font-weight: 500;
+    text-align: center;
+    margin-bottom: 4px;
+  }
+  .auth-subtitle {
+    font-size: 13px;
+    color: var(--ink-dim);
+    text-align: center;
+    line-height: 1.5;
+    margin-bottom: 16px;
+  }
+  .auth-card input {
+    background: var(--bg-elev);
+    border: 1px solid var(--line);
+    color: var(--ink);
+    font-family: inherit;
+    font-size: 15px;
+    padding: 14px 16px;
+    border-radius: 10px;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  .auth-card input:focus { border-color: var(--ink-dim); }
+  .auth-card .btn {
+    padding: 14px;
+    font-size: 14px;
+  }
+  .auth-toggle {
+    text-align: center;
+    font-size: 13px;
+    color: var(--ink-dim);
+    margin-top: 8px;
+    cursor: pointer;
+    background: none;
+    border: none;
+    font-family: inherit;
+  }
+  .auth-toggle:hover { color: var(--ink); }
+  .auth-error {
+    color: var(--danger);
+    font-size: 12px;
+    text-align: center;
+    min-height: 16px;
+  }
+
+  /* migration banner */
+  .migrate-banner {
+    background: var(--bg-elev-2);
+    border: 1px solid #3a3a3c;
+    border-radius: 10px;
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    font-size: 13px;
+    color: var(--ink);
+  }
+  .migrate-banner-title {
+    font-weight: 500;
+  }
+  .migrate-banner-detail {
+    font-size: 12px;
+    color: var(--ink-dim);
+    line-height: 1.5;
+  }
+  .migrate-banner-actions {
+    display: flex;
+    gap: 8px;
+  }
+
+  /* cloud status pill */
+  .cloud-status {
+    font-size: 12px;
+    color: var(--ink-dim);
+    padding: 4px 10px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .cloud-status::before {
+    content: '';
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--ink-dimmer);
+  }
+  .cloud-status.connected::before { background: #6dd06d; }
+  .cloud-status.error::before { background: var(--danger); }
+
   /* ===== PENDING MEMORY CARD (inline in chat) ===== */
   .pending-mem {
     background: var(--bg-elev);
@@ -777,6 +894,19 @@
     </button>
   </div>
   <div class="drawer-body">
+
+    <div class="field">
+      <label>cloud</label>
+      <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px;">
+        <span class="cloud-status" id="cloudStatus">offline</span>
+        <button class="btn" id="signOutBtn" style="display: none;">sign out</button>
+      </div>
+      <div class="help" id="cloudUserEmail"></div>
+    </div>
+
+    <div id="migrateBannerContainer"></div>
+
+    <div class="divider"></div>
 
     <div class="field">
       <label for="apiKey">openrouter api key</label>
@@ -1010,10 +1140,41 @@
   </div>
 </div>
 
+<!-- ===== AUTH SCREEN ===== -->
+<div class="auth-screen" id="authScreen">
+  <div class="auth-card">
+    <div class="auth-title">ekko</div>
+    <div class="auth-subtitle" id="authSubtitle">sign in to sync across your devices</div>
+    <input type="email" id="authEmail" placeholder="email" autocomplete="email" />
+    <input type="password" id="authPassword" placeholder="password" autocomplete="current-password" />
+    <button class="btn primary" id="authSubmit">sign in</button>
+    <button class="auth-toggle" id="authToggle">no account? create one</button>
+    <div class="auth-error" id="authError"></div>
+  </div>
+</div>
+
 <div class="toast" id="toast"></div>
 
 
 <script>
+// ============================================================
+// SUPABASE CONFIG
+// ============================================================
+const SUPABASE_URL = 'https://bzfccjqtygjrtoojvhiv.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_h_Hs_A6X2n6HbjRnbjL_NQ_Fk3GprLD';
+
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+  auth: {
+    persistSession: true,
+    autoRefreshToken: true,
+    storageKey: 'ekko_supabase_auth',
+  },
+});
+
+let currentUser = null;
+let cloudReady = false; // true once we've successfully fetched from cloud at least once
+let authMode = 'signin'; // or 'signup'
+
 // ============================================================
 // STATE
 // ============================================================
@@ -2193,17 +2354,291 @@ $('closeInjectModal').addEventListener('click', closeInjectModal);
 $('injectModalScrim').addEventListener('click', closeInjectModal);
 
 // ============================================================
+// CLOUD SYNC (PASS 1: read from cloud, write to both)
+// ============================================================
+
+// ----- auth screen -----
+function showAuthScreen() {
+  $('authScreen').classList.add('show');
+  $('authError').textContent = '';
+}
+function hideAuthScreen() {
+  $('authScreen').classList.remove('show');
+}
+
+function setAuthMode(mode) {
+  authMode = mode;
+  if (mode === 'signin') {
+    $('authSubtitle').textContent = 'sign in to sync across your devices';
+    $('authSubmit').textContent = 'sign in';
+    $('authToggle').textContent = 'no account? create one';
+  } else {
+    $('authSubtitle').textContent = 'create an account so your chats and memories follow you everywhere';
+    $('authSubmit').textContent = 'create account';
+    $('authToggle').textContent = 'already have an account? sign in';
+  }
+  $('authError').textContent = '';
+}
+
+async function handleAuthSubmit() {
+  const email = $('authEmail').value.trim();
+  const password = $('authPassword').value;
+  if (!email || !password) {
+    $('authError').textContent = 'email and password required';
+    return;
+  }
+  $('authSubmit').disabled = true;
+  $('authError').textContent = '';
+  try {
+    let result;
+    if (authMode === 'signin') {
+      result = await sb.auth.signInWithPassword({ email, password });
+    } else {
+      result = await sb.auth.signUp({ email, password });
+    }
+    if (result.error) {
+      $('authError').textContent = result.error.message.toLowerCase();
+      return;
+    }
+    if (authMode === 'signup' && !result.data.session) {
+      // email confirmation required
+      $('authError').style.color = 'var(--ink-dim)';
+      $('authError').textContent = 'check your email to confirm your account, then sign in';
+      setAuthMode('signin');
+      return;
+    }
+    // signed in
+    await onSignedIn(result.data.user);
+  } catch (err) {
+    $('authError').textContent = 'error: ' + err.message;
+  } finally {
+    $('authSubmit').disabled = false;
+  }
+}
+
+async function handleSignOut() {
+  if (!confirm('sign out? your local cache will be kept but the app will reload.')) return;
+  await sb.auth.signOut();
+  currentUser = null;
+  cloudReady = false;
+  location.reload();
+}
+
+// ----- cloud reads -----
+async function fetchCloudSettings() {
+  const { data, error } = await sb.from('settings').select('data').eq('user_id', currentUser.id).maybeSingle();
+  if (error) throw error;
+  return data?.data || null;
+}
+
+async function fetchCloudMessages() {
+  const { data, error } = await sb.from('messages')
+    .select('id, position, role, content, proposals')
+    .eq('user_id', currentUser.id)
+    .order('position', { ascending: true });
+  if (error) throw error;
+  return (data || []).map(row => {
+    const m = { role: row.role, content: row.content };
+    if (row.proposals) m.proposals = row.proposals;
+    return m;
+  });
+}
+
+async function fetchCloudMemories() {
+  const { data, error } = await sb.from('memories')
+    .select('id, title, body, keywords, priority, tokens, created_at, updated_at')
+    .eq('user_id', currentUser.id)
+    .order('updated_at', { ascending: false });
+  if (error) throw error;
+  return (data || []).map(row => ({
+    id: row.id,
+    title: row.title || '',
+    body: row.body,
+    keywords: row.keywords || [],
+    priority: row.priority || 'medium',
+    tokens: row.tokens || estimateTokens(row.body),
+    createdAt: new Date(row.created_at).getTime(),
+    updatedAt: new Date(row.updated_at).getTime(),
+  }));
+}
+
+// ----- cloud writes (used during migration in pass 1; pass 2 will write live) -----
+async function pushSettingsToCloud(stateObj) {
+  const { error } = await sb.from('settings').upsert({
+    user_id: currentUser.id,
+    data: stateObj,
+    updated_at: new Date().toISOString(),
+  });
+  if (error) throw error;
+}
+
+async function pushMessagesToCloud(msgs) {
+  // wipe existing then insert all
+  await sb.from('messages').delete().eq('user_id', currentUser.id);
+  if (msgs.length === 0) return;
+  const rows = msgs.map((m, i) => ({
+    user_id: currentUser.id,
+    position: i,
+    role: m.role,
+    content: m.content,
+    proposals: m.proposals || null,
+  }));
+  const { error } = await sb.from('messages').insert(rows);
+  if (error) throw error;
+}
+
+async function pushMemoriesToCloud(mems) {
+  // wipe existing then insert all
+  await sb.from('memories').delete().eq('user_id', currentUser.id);
+  if (mems.length === 0) return;
+  const rows = mems.map(m => ({
+    user_id: currentUser.id,
+    title: m.title || null,
+    body: m.body,
+    keywords: m.keywords || [],
+    priority: m.priority || 'medium',
+    tokens: m.tokens || estimateTokens(m.body),
+  }));
+  const { error } = await sb.from('memories').insert(rows);
+  if (error) throw error;
+}
+
+// ----- migration -----
+function showMigrateBanner(localCounts) {
+  const c = $('migrateBannerContainer');
+  c.innerHTML = `
+    <div class="migrate-banner">
+      <div class="migrate-banner-title">local data found</div>
+      <div class="migrate-banner-detail">
+        you have <strong>${localCounts.messages}</strong> messages and <strong>${localCounts.memories}</strong> memories saved locally on this device, but nothing in the cloud yet. upload them so they sync to your other devices?
+      </div>
+      <div class="migrate-banner-actions">
+        <button class="btn primary" id="doMigrateBtn">upload to cloud</button>
+        <button class="btn" id="dismissMigrateBtn">not now</button>
+      </div>
+    </div>
+  `;
+  $('doMigrateBtn').addEventListener('click', doMigration);
+  $('dismissMigrateBtn').addEventListener('click', () => { c.innerHTML = ''; });
+}
+
+async function doMigration() {
+  const btn = $('doMigrateBtn');
+  btn.disabled = true;
+  btn.textContent = 'uploading...';
+  try {
+    await pushSettingsToCloud(state);
+    await pushMessagesToCloud(messages);
+    await pushMemoriesToCloud(memories);
+    $('migrateBannerContainer').innerHTML = '';
+    showToast('migrated to cloud');
+    // re-fetch to confirm and update timestamps
+    await loadFromCloud();
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = 'upload to cloud';
+    showToast('migration failed: ' + err.message, true);
+  }
+}
+
+// ----- the main "load all data from cloud" -----
+async function loadFromCloud() {
+  try {
+    const [cloudSettings, cloudMessages, cloudMemories] = await Promise.all([
+      fetchCloudSettings(),
+      fetchCloudMessages(),
+      fetchCloudMemories(),
+    ]);
+
+    // settings: merge cloud over local defaults, but keep local apiKey/prompt if cloud is empty
+    if (cloudSettings) {
+      state = { ...defaults, ...state, ...cloudSettings };
+      saveState();
+    }
+    // messages and memories: cloud is the source of truth
+    if (cloudMessages.length > 0 || cloudMemories.length > 0) {
+      messages = cloudMessages;
+      memories = cloudMemories;
+      saveMessages();
+      saveMemories();
+    }
+
+    cloudReady = true;
+    setCloudStatus('connected');
+    hydrate();
+    render();
+    renderMemList();
+
+    // if cloud is totally empty but local has data, offer migration
+    const cloudEmpty = !cloudSettings && cloudMessages.length === 0 && cloudMemories.length === 0;
+    const localHasData = messages.length > 0 || memories.length > 0;
+    if (cloudEmpty && localHasData) {
+      showMigrateBanner({ messages: messages.length, memories: memories.length });
+    }
+  } catch (err) {
+    console.error('cloud load failed', err);
+    setCloudStatus('error');
+    showToast('cloud sync failed — using local cache', true);
+  }
+}
+
+function setCloudStatus(status) {
+  const el = $('cloudStatus');
+  el.classList.remove('connected', 'error');
+  if (status === 'connected') {
+    el.classList.add('connected');
+    el.textContent = 'connected';
+    $('signOutBtn').style.display = 'inline-block';
+    if (currentUser) $('cloudUserEmail').textContent = currentUser.email;
+  } else if (status === 'error') {
+    el.classList.add('error');
+    el.textContent = 'error';
+  } else {
+    el.textContent = 'offline';
+  }
+}
+
+// ----- called once user is signed in -----
+async function onSignedIn(user) {
+  currentUser = user;
+  hideAuthScreen();
+  setCloudStatus('connecting');
+  $('cloudStatus').textContent = 'loading…';
+  await loadFromCloud();
+  // if no key/prompt yet, nudge drawer open
+  if (!state.apiKey || !state.prompt) {
+    setTimeout(openDrawer, 400);
+  }
+}
+
+// ----- auth event listeners -----
+$('authSubmit').addEventListener('click', handleAuthSubmit);
+$('authToggle').addEventListener('click', () => {
+  setAuthMode(authMode === 'signin' ? 'signup' : 'signin');
+});
+$('authPassword').addEventListener('keydown', e => {
+  if (e.key === 'Enter') handleAuthSubmit();
+});
+$('signOutBtn').addEventListener('click', handleSignOut);
+
+// ============================================================
 // INIT
 // ============================================================
 hydrate();
 render();
 renderMemList();
 autoResize();
+setCloudStatus('offline');
 
-// if no key/prompt yet, nudge open
-if (!state.apiKey || !state.prompt) {
-  setTimeout(openDrawer, 400);
-}
+// boot: check for existing supabase session
+(async () => {
+  const { data: { session } } = await sb.auth.getSession();
+  if (session?.user) {
+    await onSignedIn(session.user);
+  } else {
+    showAuthScreen();
+  }
+})();
 </script>
 </body>
 </html>
