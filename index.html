@@ -1299,7 +1299,8 @@
 
     <div class="btn-row">
       <button class="btn primary" id="saveBtn">save</button>
-      <button class="btn" id="exportBtn">export chat</button>
+      <button class="btn" id="exportBtn">export json</button>
+      <button class="btn" id="exportMdBtn">export md</button>
       <button class="btn danger" id="clearBtn">clear chat</button>
     </div>
 
@@ -3080,6 +3081,45 @@ $('exportBtn').addEventListener('click', () => {
   const a = document.createElement('a');
   a.href = url;
   a.download = 'ekko-chat-' + new Date().toISOString().slice(0,10) + '.json';
+  a.click();
+  URL.revokeObjectURL(url);
+  showToast('exported');
+});
+
+$('exportMdBtn').addEventListener('click', () => {
+  // build a readable markdown version of the chat
+  const lines = [];
+  lines.push('# ekko chat');
+  lines.push('');
+  lines.push('exported: ' + new Date().toISOString());
+  lines.push('model: ' + state.model);
+  lines.push('messages: ' + messages.length);
+  lines.push('');
+  lines.push('---');
+  lines.push('');
+
+  for (const m of messages) {
+    if (m.role === 'system') {
+      lines.push('> *' + (m.content || '') + '*');
+      lines.push('');
+      continue;
+    }
+    const label = m.role === 'user' ? '## sophie' : '## ekko';
+    lines.push(label);
+    lines.push('');
+    if (m.content) {
+      lines.push(m.content);
+      lines.push('');
+    }
+    lines.push('---');
+    lines.push('');
+  }
+
+  const blob = new Blob([lines.join('\n')], { type: 'text/markdown' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'ekko-chat-' + new Date().toISOString().slice(0,10) + '.md';
   a.click();
   URL.revokeObjectURL(url);
   showToast('exported');
