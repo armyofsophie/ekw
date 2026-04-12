@@ -695,6 +695,55 @@
     flex-shrink: 0;
   }
 
+  /* inline tag pills on memory cards */
+  .mem-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 6px;
+  }
+  .mem-pill {
+    display: inline-block;
+    font-size: 10px;
+    padding: 2px 7px;
+    border-radius: 10px;
+    background: rgba(255,255,255,0.06);
+    color: var(--ink-dim);
+    border: 1px solid transparent;
+    line-height: 1.4;
+  }
+
+  /* filter bar above the memory list */
+  .mem-filter-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 8px 0;
+    margin-bottom: 8px;
+    border-bottom: 1px solid var(--line);
+  }
+  .mem-filter-pill {
+    display: inline-block;
+    font-size: 11px;
+    padding: 4px 10px;
+    border-radius: 12px;
+    background: rgba(255,255,255,0.04);
+    color: var(--ink-dim);
+    border: 1px solid var(--line);
+    cursor: pointer;
+    user-select: none;
+  }
+  .mem-filter-pill:hover { color: var(--ink); }
+  .mem-filter-pill.active {
+    background: var(--ink);
+    color: #000;
+    border-color: var(--ink);
+  }
+  .mem-filter-pill.clear {
+    color: var(--ink-dimmer);
+    border-style: dashed;
+  }
+
   /* edit modal */
   .modal-scrim {
     position: fixed;
@@ -1234,6 +1283,7 @@
         <div class="mem-section-title">memory</div>
         <div class="mem-count" id="memCountText">0 blocks</div>
       </div>
+      <div class="mem-filter-bar" id="memFilterBar" style="display:none;"></div>
       <div class="mem-list" id="memList"></div>
       <div class="btn-row">
         <button class="btn" id="addMemBtn">+ add</button>
@@ -1277,9 +1327,9 @@
         <div class="token-meter" id="memTokenMeter">~0 tokens</div>
       </div>
       <div class="field">
-        <label for="memKeywords">keywords (comma-separated)</label>
-        <input type="text" id="memKeywords" placeholder="trinity, persona, mode" />
-        <div class="help">when your message contains any of these (case-insensitive), this memory fires. ignored if pinned.</div>
+        <label for="memKeywords">keywords & tags (comma-separated)</label>
+        <input type="text" id="memKeywords" placeholder="trinity, persona, #craft" />
+        <div class="help">when your message contains any of these (case-insensitive, whole-word), this memory fires. keywords starting with <code>#</code> are treated as tags for organisation only — they don't trigger loading, but you can filter the memory list by them. ignored for triggering if pinned.</div>
       </div>
       <div class="field">
         <label for="memPriority">priority</label>
@@ -1527,7 +1577,7 @@ function render() {
     else if (m.role === 'ekko') attachEkkoActions(el, i);
     chatEl.appendChild(el);
   });
-  scrollToBottom();
+  scrollToBottom(true);
 }
 
 function attachUserActions(el, idx) {
@@ -1663,12 +1713,21 @@ function formatEkko(text) {
   return escaped;
 }
 
-function scrollToBottom() {
+function scrollToBottom(force) {
   requestAnimationFrame(() => {
     const main = $('main');
+    // only auto-scroll if the user hasn't taken control by scrolling up,
+    // unless caller explicitly forces (user send, jump button, etc)
+    if (!force && userHasScrolled) return;
     main.scrollTop = main.scrollHeight;
+    userHasScrolled = false;
   });
 }
+
+// track whether the user has scrolled up during a stream; if they have,
+// we stop auto-scrolling until either a new user message arrives or they
+// tap jump-to-bottom.
+let userHasScrolled = false;
 
 // jump-to-bottom button visibility
 function updateJumpBottomVisibility() {
@@ -1691,7 +1750,10 @@ function appendMsg(role, content, attachments) {
   if (emptyEl.parentNode) emptyEl.remove();
   const el = renderMsg(msg);
   chatEl.appendChild(el);
-  scrollToBottom();
+  // forcing here is correct: when the user sends a message OR when ekko
+  // appends a system message, we want to snap to bottom. resets
+  // userHasScrolled so that a fresh stream starts with auto-scroll enabled.
+  scrollToBottom(true);
   return el;
 }
 
@@ -1701,7 +1763,7 @@ function showTyping() {
   el.id = 'typing';
   el.innerHTML = '<div class="body"><div class="typing"><span></span><span></span><span></span></div></div>';
   chatEl.appendChild(el);
-  scrollToBottom();
+  scrollToBottom(true);
 }
 function removeTyping() {
   const el = $('typing');
@@ -1802,10 +1864,53 @@ function newMemId() {
   return 'mem_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7);
 }
 
+// active tag filter (null = show all). tags are "#foo" in a memory's keywords.
+let activeMemTagFilter = null;
+
 function renderMemList() {
   const list = $('memList');
+  const filterBar = $('memFilterBar');
   list.innerHTML = '';
   $('memCountText').textContent = memories.length + (memories.length === 1 ? ' block' : ' blocks');
+
+  // collect all unique tags across all memories
+  const allTags = new Set();
+  for (const m of memories) {
+    if (!m.keywords) continue;
+    for (const k of m.keywords) {
+      if (k && k.startsWith('#')) allTags.add(k.toLowerCase());
+    }
+  }
+
+  // render the filter bar (only if there's at least one tag)
+  if (allTags.size > 0) {
+    filterBar.style.display = 'flex';
+    filterBar.innerHTML = '';
+    const sortedTags = [...allTags].sort();
+    for (const tag of sortedTags) {
+      const pill = document.createElement('span');
+      pill.className = 'mem-filter-pill' + (activeMemTagFilter === tag ? ' active' : '');
+      pill.textContent = tag;
+      pill.addEventListener('click', () => {
+        activeMemTagFilter = (activeMemTagFilter === tag) ? null : tag;
+        renderMemList();
+      });
+      filterBar.appendChild(pill);
+    }
+    if (activeMemTagFilter) {
+      const clear = document.createElement('span');
+      clear.className = 'mem-filter-pill clear';
+      clear.textContent = 'clear filter';
+      clear.addEventListener('click', () => {
+        activeMemTagFilter = null;
+        renderMemList();
+      });
+      filterBar.appendChild(clear);
+    }
+  } else {
+    filterBar.style.display = 'none';
+    filterBar.innerHTML = '';
+  }
 
   // sort: pinned first, then high > medium > low, then by recency
   const priorityOrder = { pinned: 0, high: 1, medium: 2, low: 3 };
@@ -1816,9 +1921,20 @@ function renderMemList() {
     return (b.updatedAt || 0) - (a.updatedAt || 0);
   });
 
-  for (const m of sorted) {
+  // apply tag filter if active
+  const visible = activeMemTagFilter
+    ? sorted.filter(m => m.keywords && m.keywords.some(k => k && k.toLowerCase() === activeMemTagFilter))
+    : sorted;
+
+  for (const m of visible) {
     const el = document.createElement('div');
     el.className = 'mem-item' + (m.priority === 'pinned' ? ' pinned' : '');
+
+    // split keywords into tags (#-prefixed) and trigger keywords
+    const kws = m.keywords || [];
+    const tags = kws.filter(k => k && k.startsWith('#'));
+    const triggers = kws.filter(k => k && !k.startsWith('#'));
+
     el.innerHTML = `
       <div class="mem-item-row1">
         <div class="mem-item-title"></div>
@@ -1832,7 +1948,21 @@ function renderMemList() {
     el.querySelector('.mem-item-title').textContent = m.title || '(untitled)';
     el.querySelector('.mem-tags').textContent = m.priority === 'pinned'
       ? 'always loaded'
-      : (m.keywords && m.keywords.length ? m.keywords.join(', ') : 'no keywords');
+      : (triggers.length ? triggers.join(', ') : 'no trigger keywords');
+
+    // render tag pills as a separate row below, if any
+    if (tags.length > 0) {
+      const pillsRow = document.createElement('div');
+      pillsRow.className = 'mem-pills';
+      for (const t of tags) {
+        const pill = document.createElement('span');
+        pill.className = 'mem-pill';
+        pill.textContent = t;
+        pillsRow.appendChild(pill);
+      }
+      el.appendChild(pillsRow);
+    }
+
     el.addEventListener('click', () => openMemModal(m.id));
     list.appendChild(el);
   }
@@ -1850,6 +1980,9 @@ function openMemModal(id = null) {
   updateMemTokenMeter();
   $('memModal').classList.add('open');
   $('memModalScrim').classList.add('open');
+  // give the browser a frame to actually paint the modal before measuring
+  // scrollHeight, otherwise the textarea is still 0-height
+  requestAnimationFrame(autoSizeMemBody);
 }
 function closeMemModal() {
   $('memModal').classList.remove('open');
@@ -1862,6 +1995,13 @@ function updateMemTokenMeter() {
   meter.textContent = `~${t} tokens`;
   meter.classList.toggle('warn', t > 600);
   meter.classList.toggle('over', t > 1000);
+}
+function autoSizeMemBody() {
+  const ta = $('memBody');
+  // reset so we can measure real content height, then cap at ~60% of viewport
+  ta.style.height = 'auto';
+  const max = Math.floor(window.innerHeight * 0.6);
+  ta.style.height = Math.min(ta.scrollHeight + 2, max) + 'px';
 }
 
 function saveMemFromModal() {
@@ -1932,7 +2072,16 @@ function selectMemoriesForMessage(userText) {
       continue;
     }
     if (!m.keywords || !m.keywords.length) continue;
-    const hits = m.keywords.filter(k => k && text.includes(k));
+    const hits = m.keywords.filter(k => {
+      if (!k) return false;
+      // tags (#-prefixed) are organisational, not triggers — skip them
+      if (k.startsWith('#')) return false;
+      // whole-word match, so "art" doesn't fire on "start" and "memory"
+      // doesn't fire on "memorise". escape regex metachars to stay safe.
+      const escaped = k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const re = new RegExp('(^|[^a-z0-9])' + escaped + '([^a-z0-9]|$)', 'i');
+      return re.test(text);
+    });
     if (hits.length > 0) {
       matched.push({ memory: m, reason: 'keyword: ' + hits.join(', '), hitCount: hits.length });
     }
@@ -2502,10 +2651,12 @@ async function sendMessage() {
       paintedLength++;
       paintFrame();
 
-      // only auto-scroll if user is already near the bottom
-      const main = $('main');
-      const nearBottom = main.scrollHeight - main.scrollTop - main.clientHeight < 120;
-      if (nearBottom) main.scrollTop = main.scrollHeight;
+      // respect user scroll: if they've scrolled up during this stream, don't
+      // yank them back. otherwise keep the caret in view.
+      if (!userHasScrolled) {
+        const main = $('main');
+        main.scrollTop = main.scrollHeight;
+      }
 
       // delay
       const baseDelay = state.typingSpeed || 0;
@@ -2791,10 +2942,21 @@ $('model').addEventListener('change', e => {
   $('customModelField').style.display = e.target.value === '__custom__' ? 'flex' : 'none';
 });
 
-// ===== jump to bottom =====
-$('main').addEventListener('scroll', updateJumpBottomVisibility, { passive: true });
+// ===== jump to bottom + user scroll tracking =====
+$('main').addEventListener('scroll', () => {
+  updateJumpBottomVisibility();
+  // if user is more than a bit off the bottom, they've taken control
+  const main = $('main');
+  const distanceFromBottom = main.scrollHeight - main.scrollTop - main.clientHeight;
+  if (distanceFromBottom > 50) {
+    userHasScrolled = true;
+  } else {
+    // back at the bottom → auto-scroll can resume
+    userHasScrolled = false;
+  }
+}, { passive: true });
 $('jumpBottom').addEventListener('click', () => {
-  scrollToBottom();
+  scrollToBottom(true);
 });
 
 // ===== header model switcher =====
@@ -2930,7 +3092,10 @@ $('cancelMemBtn').addEventListener('click', closeMemModal);
 $('memModalScrim').addEventListener('click', closeMemModal);
 $('saveMemBtn').addEventListener('click', saveMemFromModal);
 $('deleteMemBtn').addEventListener('click', deleteCurrentMem);
-$('memBody').addEventListener('input', updateMemTokenMeter);
+$('memBody').addEventListener('input', () => {
+  updateMemTokenMeter();
+  autoSizeMemBody();
+});
 
 $('bulkImportBtn').addEventListener('click', openBulkModal);
 $('closeBulkModal').addEventListener('click', closeBulkModal);
