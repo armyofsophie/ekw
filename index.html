@@ -1516,6 +1516,38 @@
   </div>
 </div>
 
+<!-- ===== SYNC CONFLICT MODAL ===== -->
+<!-- shown when this tab tries to push messages but the cloud has more
+     messages than what we're about to push. forces a conscious choice
+     between reloading from cloud (safe default) and overwriting cloud
+     with this tab's version (escape hatch). -->
+<div class="modal-scrim" id="syncConflictScrim"></div>
+<div class="modal" id="syncConflictModal">
+  <div class="modal-card">
+    <div class="modal-head">
+      <div class="modal-title">cloud has newer messages</div>
+    </div>
+    <div class="modal-body">
+      <p style="color: var(--ink); font-size: 14px; line-height: 1.5; margin: 0 0 12px 0;">
+        another device added messages to this conversation since this tab last synced.
+      </p>
+      <p style="color: var(--ink-dim); font-size: 13px; line-height: 1.5; margin: 0 0 8px 0;" id="syncConflictDetail">
+        cloud has more messages than this tab. saving from here would discard the newer ones.
+      </p>
+      <p style="color: var(--ink-dim); font-size: 13px; line-height: 1.5; margin: 0;">
+        <strong>refresh from cloud</strong> is the safe choice — you'll lose any unsaved changes in this tab but keep what's in the cloud.
+      </p>
+    </div>
+    <div class="modal-foot">
+      <div class="left"></div>
+      <div class="right">
+        <button class="btn danger" id="syncConflictOverwrite">keep my version</button>
+        <button class="btn primary" id="syncConflictReload">refresh from cloud</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- ===== AUTH SCREEN ===== -->
 <div class="auth-screen" id="authScreen">
   <div class="auth-card">
@@ -3136,6 +3168,51 @@ $('jumpBottom').addEventListener('click', () => {
   scrollToBottom(true);
 });
 
+// ===== tab visibility — proactive freshness check =====
+// when the tab regains focus (laptop wake from sleep, switching back from
+// another app), check if the cloud has gained messages while we were away.
+// if so, surface the conflict modal *before* the user starts typing into
+// a stale view. this is the "catch it early" half of the sync safety net.
+//
+// guard with a debounce: if the user is rapidly switching tabs we don't
+// want to spam them with checks. once per 30s minimum.
+let lastVisibilityCheck = 0;
+const VISIBILITY_CHECK_COOLDOWN_MS = 30000;
+
+document.addEventListener('visibilitychange', async () => {
+  if (document.hidden) return;
+  if (!cloudReady || !currentUser) return;
+  // also skip if we're currently mid-stream — don't disrupt an active turn
+  if (typeof isStreaming !== 'undefined' && isStreaming) return;
+  // don't check if the conflict modal is already open
+  if ($('syncConflictModal').classList.contains('open')) return;
+
+  const now = Date.now();
+  if (now - lastVisibilityCheck < VISIBILITY_CHECK_COOLDOWN_MS) return;
+  lastVisibilityCheck = now;
+
+  try {
+    const stale = await isLocalStale();
+    if (stale) {
+      showSyncConflictModal({
+        onReload: async () => {
+          await loadFromCloud();
+          showToast('refreshed from cloud');
+        },
+        onOverwrite: async () => {
+          // user wants to keep what's in this tab — push it now to make
+          // the cloud match. this is the explicit "i meant it" path.
+          await doPushMessages(messages);
+          showToast('local version pushed to cloud');
+        },
+      });
+    }
+  } catch (err) {
+    // network blip on focus check, not worth surfacing to the user
+    console.warn('visibility freshness check failed', err);
+  }
+});
+
 // ===== header model switcher =====
 function populateHeaderSwitcher() {
   const header = $('headerModelSwitcher');
@@ -3338,6 +3415,24 @@ $('memIndicator').addEventListener('click', openInjectModal);
 $('closeInjectModal').addEventListener('click', closeInjectModal);
 $('injectModalScrim').addEventListener('click', closeInjectModal);
 
+// sync conflict modal — wired up at startup, callbacks set per-show.
+$('syncConflictReload').addEventListener('click', async () => {
+  const cb = syncConflictCallbacks;
+  hideSyncConflictModal();
+  if (cb && cb.onReload) await cb.onReload();
+});
+$('syncConflictOverwrite').addEventListener('click', async () => {
+  const cb = syncConflictCallbacks;
+  hideSyncConflictModal();
+  if (cb && cb.onOverwrite) await cb.onOverwrite();
+});
+// scrim click defaults to safe action (reload), same as the primary button
+$('syncConflictScrim').addEventListener('click', async () => {
+  const cb = syncConflictCallbacks;
+  hideSyncConflictModal();
+  if (cb && cb.onReload) await cb.onReload();
+});
+
 // ============================================================
 // CLOUD SYNC (PASS 1: read from cloud, write to both)
 // ============================================================
@@ -3476,6 +3571,62 @@ async function fetchCloudMessages() {
   });
 }
 
+// cheap freshness check — just the count, no payload fetch.
+// returns { count, latestPosition } so we can compare against local.
+async function fetchCloudMessageCount() {
+  const { count, error } = await sb.from('messages')
+    .select('id', { count: 'exact', head: true })
+    .eq('user_id', currentUser.id);
+  if (error) throw error;
+  return count || 0;
+}
+
+// determine whether local copy is stale relative to cloud.
+// "stale" here = cloud has MORE messages than local. that means another
+// device wrote something since this tab last fetched. doesn't catch
+// edits-in-place or message deletions, but catches the dominant failure
+// mode (one device adds messages, another device blindly overwrites).
+async function isLocalStale() {
+  if (!cloudReady || !currentUser) return false;
+  try {
+    const cloudCount = await fetchCloudMessageCount();
+    return cloudCount > messages.length;
+  } catch (err) {
+    // if we can't reach the cloud, don't block the save — better to push
+    // possibly-stale data than to lose new work to a network blip.
+    console.warn('staleness check failed, allowing save', err);
+    return false;
+  }
+}
+
+// sync conflict modal — shown when a save would overwrite newer cloud data.
+// stores the pending callbacks on the modal element itself so the buttons
+// (which are wired up once at startup) know what to do.
+let syncConflictCallbacks = null;
+
+function showSyncConflictModal({ onReload, onOverwrite }) {
+  syncConflictCallbacks = { onReload, onOverwrite };
+  // try to fetch the cloud count to give the user concrete numbers
+  (async () => {
+    try {
+      const cloudCount = await fetchCloudMessageCount();
+      $('syncConflictDetail').textContent =
+        `cloud has ${cloudCount} messages. this tab has ${messages.length}. saving from here would discard ${cloudCount - messages.length} message${cloudCount - messages.length === 1 ? '' : 's'} from your other device.`;
+    } catch {
+      $('syncConflictDetail').textContent =
+        'cloud has more messages than this tab. saving from here would discard the newer ones.';
+    }
+  })();
+  $('syncConflictModal').classList.add('open');
+  $('syncConflictScrim').classList.add('open');
+}
+
+function hideSyncConflictModal() {
+  $('syncConflictModal').classList.remove('open');
+  $('syncConflictScrim').classList.remove('open');
+  syncConflictCallbacks = null;
+}
+
 async function fetchCloudMemories() {
   const { data, error } = await sb.from('memories')
     .select('id, title, body, keywords, priority, tokens, created_at, updated_at')
@@ -3505,6 +3656,31 @@ async function pushSettingsToCloud(stateObj) {
 }
 
 async function pushMessagesToCloud(msgs) {
+  // staleness guard: if cloud has more messages than what we're about to push,
+  // another device wrote since we last fetched. surface the conflict to the
+  // user instead of blindly wiping their other device's work.
+  const stale = await isLocalStale();
+  if (stale) {
+    return new Promise((resolve) => {
+      showSyncConflictModal({
+        onReload: async () => {
+          // discard local, pull fresh from cloud
+          await loadFromCloud();
+          showToast('refreshed from cloud');
+          resolve();
+        },
+        onOverwrite: async () => {
+          // user wants their local version — proceed with the push
+          await doPushMessages(msgs);
+          resolve();
+        },
+      });
+    });
+  }
+  await doPushMessages(msgs);
+}
+
+async function doPushMessages(msgs) {
   // wipe existing then insert all
   await sb.from('messages').delete().eq('user_id', currentUser.id);
   if (msgs.length === 0) return;
