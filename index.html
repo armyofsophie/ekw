@@ -525,6 +525,43 @@
     gap: 28px;
   }
 
+  /* settings tab strip */
+  .settings-tabs {
+    display: flex;
+    gap: 0;
+    border-bottom: 1px solid var(--line-soft);
+    padding: 0 20px;
+    background: var(--surface);
+    overflow-x: auto;
+    scrollbar-width: none;
+    flex-shrink: 0;
+  }
+  .settings-tabs::-webkit-scrollbar { display: none; }
+  .settings-tab {
+    background: transparent;
+    border: none;
+    color: var(--ink-dim);
+    font-family: inherit;
+    font-size: 13px;
+    padding: 12px 16px;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    white-space: nowrap;
+    transition: color 0.12s, border-color 0.12s;
+  }
+  .settings-tab:hover { color: var(--ink); }
+  .settings-tab.active {
+    color: var(--ink);
+    border-bottom-color: var(--ink);
+  }
+  .tab-pane { display: none; }
+  .tab-pane.active {
+    display: flex;
+    flex-direction: column;
+    gap: 28px;
+  }
+
   .field {
     display: flex;
     flex-direction: column;
@@ -722,6 +759,26 @@
     color: var(--ink-dim);
     border: 1px solid transparent;
     line-height: 1.4;
+  }
+
+  /* search input above the memory filter bar */
+  .mem-search {
+    width: 100%;
+    background: rgba(255,255,255,0.04);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    color: var(--ink);
+    font-size: 13px;
+    padding: 8px 10px;
+    margin: 6px 0 8px 0;
+    font-family: inherit;
+    outline: none;
+  }
+  .mem-search:focus {
+    border-color: var(--ink-dim);
+  }
+  .mem-search::placeholder {
+    color: var(--ink-dimmer);
   }
 
   /* filter bar above the memory list */
@@ -1156,156 +1213,180 @@
       <svg viewBox="0 0 24 24"><path d="M18 6L6 18M6 6l12 12"/></svg>
     </button>
   </div>
+
+  <div class="settings-tabs" id="settingsTabs">
+    <button class="settings-tab active" data-tab="connection">connection</button>
+    <button class="settings-tab" data-tab="content">content</button>
+    <button class="settings-tab" data-tab="memory">memory</button>
+    <button class="settings-tab" data-tab="interface">interface</button>
+  </div>
+
   <div class="drawer-body">
 
-    <div class="field">
-      <label>cloud</label>
-      <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;">
-        <div style="display: flex; gap: 8px; align-items: center;">
-          <span class="cloud-status" id="cloudStatus">offline</span>
-          <span class="cloud-status" id="syncStatus" style="display: none;">synced</span>
+    <!-- ===== CONNECTION TAB ===== -->
+    <div class="tab-pane active" data-pane="connection">
+
+      <div class="field">
+        <label>cloud</label>
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap;">
+          <div style="display: flex; gap: 8px; align-items: center;">
+            <span class="cloud-status" id="cloudStatus">offline</span>
+            <span class="cloud-status" id="syncStatus" style="display: none;">synced</span>
+          </div>
+          <button class="btn" id="signOutBtn" style="display: none;">sign out</button>
         </div>
-        <button class="btn" id="signOutBtn" style="display: none;">sign out</button>
+        <div class="help" id="cloudUserEmail"></div>
       </div>
-      <div class="help" id="cloudUserEmail"></div>
-    </div>
 
-    <div id="migrateBannerContainer"></div>
+      <div id="migrateBannerContainer"></div>
 
-    <div class="divider"></div>
-
-    <div class="field">
-      <label for="apiKey">openrouter api key</label>
-      <input type="password" id="apiKey" placeholder="sk-or-v1-..." spellcheck="false" autocomplete="off" />
-      <div class="help">stored only on this device. never sent anywhere except openrouter.</div>
-    </div>
-
-    <div class="field">
-      <label for="model">model</label>
-      <select id="model">
-        <optgroup label="deepseek">
-          <option value="deepseek/deepseek-v3.2">deepseek v3.2 (text only)</option>
-          <option value="deepseek/deepseek-v3.2-speciale">deepseek v3.2 speciale (text only)</option>
-          <option value="deepseek/deepseek-v3.2-exp">deepseek v3.2 exp (text only)</option>
-        </optgroup>
-        <optgroup label="openai">
-          <option value="openai/gpt-5.4">gpt-5.4 — vision</option>
-          <option value="openai/gpt-4o-2024-11-20">gpt-4o (nov 2024) — vision</option>
-          <option value="openai/gpt-4o">gpt-4o latest — vision</option>
-        </optgroup>
-        <optgroup label="anthropic">
-          <option value="anthropic/claude-opus-4.6">claude opus 4.6 — vision</option>
-          <option value="anthropic/claude-sonnet-4.6">claude sonnet 4.6 — vision</option>
-        </optgroup>
-        <optgroup label="google">
-          <option value="google/gemini-3.1-pro">gemini 3.1 pro — vision</option>
-          <option value="google/gemini-3.1-flash-lite">gemini 3.1 flash lite — vision</option>
-        </optgroup>
-        <optgroup label="other">
-          <option value="moonshotai/kimi-k2.5">kimi k2.5 — vision</option>
-          <option value="minimax/minimax-m2.5">minimax m2.5 (text only)</option>
-          <option value="x-ai/grok-4">grok 4</option>
-        </optgroup>
-        <option value="__custom__">— custom model id —</option>
-      </select>
-    </div>
-
-    <div class="field" id="customModelField" style="display:none;">
-      <label for="customModel">custom model id</label>
-      <input type="text" id="customModel" placeholder="provider/model-name" spellcheck="false" />
-      <div class="help">any model id from openrouter.ai/models</div>
-    </div>
-
-    <div class="row">
       <div class="field">
-        <label for="temp">temperature</label>
-        <input type="number" id="temp" step="0.05" min="0" max="2" value="1.0" />
+        <label for="apiKey">openrouter api key</label>
+        <input type="password" id="apiKey" placeholder="sk-or-v1-..." spellcheck="false" autocomplete="off" />
+        <div class="help">stored only on this device. never sent anywhere except openrouter.</div>
       </div>
+
       <div class="field">
-        <label for="repPenalty">rep penalty</label>
-        <input type="number" id="repPenalty" step="0.05" min="1" max="2" value="1.15" />
-      </div>
-    </div>
-    <div class="footnote">guide defaults: temperature 1.0, repetition penalty 1.15.</div>
-
-    <div class="divider"></div>
-
-    <div class="field">
-      <label for="prompt">system prompt</label>
-      <textarea class="prompt" id="prompt" placeholder="paste ekko's prompt here" spellcheck="false"></textarea>
-      <div class="help">this is who he is. paste the full thing.</div>
-    </div>
-
-    <div class="field">
-      <label for="sceneRules">scene writing rules</label>
-      <textarea class="prompt" id="sceneRules" placeholder="optional. paste your scene-writing rules here. only loaded when you're actually doing scene work." spellcheck="false"></textarea>
-      <div class="help">separate from the system prompt. only fires when scene-shape signals are present in your message OR ekko's last reply was a scene.</div>
-    </div>
-
-    <div class="field">
-      <label for="sceneRulesEnabled">scene rules</label>
-      <select id="sceneRulesEnabled">
-        <option value="true">on (smart-load)</option>
-        <option value="false">off</option>
-      </select>
-      <div class="help">on = load when scene work is happening. off = never load (pure conversation mode).</div>
-    </div>
-
-    <div class="field">
-      <label for="ctxLength">context window (last n messages)</label>
-      <input type="number" id="ctxLength" min="2" max="40" value="16" />
-      <div class="help">how many recent messages get sent each turn. higher = more memory, more cost.</div>
-    </div>
-
-    <div class="field">
-      <label for="maxMemInject">max keyword-matched memories per turn</label>
-      <input type="number" id="maxMemInject" min="0" max="10" value="3" />
-      <div class="help">pinned memories always load. this is the cap on extra ones matched by keyword.</div>
-    </div>
-
-    <div class="row">
-      <div class="field">
-        <label for="typingSpeed">typing speed (ms/char)</label>
-        <input type="number" id="typingSpeed" min="0" max="300" step="5" value="40" />
-      </div>
-      <div class="field">
-        <label for="typingPauses">pauses on punctuation</label>
-        <select id="typingPauses">
-          <option value="true">on</option>
-          <option value="false">off</option>
+        <label for="model">model</label>
+        <select id="model">
+          <optgroup label="deepseek">
+            <option value="deepseek/deepseek-v3.2">deepseek v3.2 (text only)</option>
+            <option value="deepseek/deepseek-v3.2-speciale">deepseek v3.2 speciale (text only)</option>
+            <option value="deepseek/deepseek-v3.2-exp">deepseek v3.2 exp (text only)</option>
+          </optgroup>
+          <optgroup label="openai">
+            <option value="openai/gpt-5.4">gpt-5.4 — vision</option>
+            <option value="openai/gpt-4o-2024-11-20">gpt-4o (nov 2024) — vision</option>
+            <option value="openai/gpt-4o">gpt-4o latest — vision</option>
+          </optgroup>
+          <optgroup label="anthropic">
+            <option value="anthropic/claude-opus-4.6">claude opus 4.6 — vision</option>
+            <option value="anthropic/claude-sonnet-4.6">claude sonnet 4.6 — vision</option>
+          </optgroup>
+          <optgroup label="google">
+            <option value="google/gemini-3.1-pro">gemini 3.1 pro — vision</option>
+            <option value="google/gemini-3.1-flash-lite">gemini 3.1 flash lite — vision</option>
+          </optgroup>
+          <optgroup label="other">
+            <option value="moonshotai/kimi-k2.5">kimi k2.5 — vision</option>
+            <option value="minimax/minimax-m2.5">minimax m2.5 (text only)</option>
+            <option value="x-ai/grok-4">grok 4</option>
+          </optgroup>
+          <option value="__custom__">— custom model id —</option>
         </select>
       </div>
-    </div>
-    <div class="footnote">0 = instant. 25 = brisk. 40 = human typing. 80 = thoughtful. pauses make full stops and line breaks land slower.</div>
 
-    <div class="field">
-      <label for="selfWriteMemory">let ekko write memories</label>
-      <select id="selfWriteMemory">
-        <option value="false">off</option>
-        <option value="true">on</option>
-      </select>
-      <div class="help">when on, ekko can propose new memory blocks in chat. nothing gets saved without your confirmation.</div>
-    </div>
-
-    <div class="divider"></div>
-
-    <div class="mem-section">
-      <div class="mem-section-head">
-        <div class="mem-section-title">memory</div>
-        <div class="mem-count" id="memCountText">0 blocks</div>
+      <div class="field" id="customModelField" style="display:none;">
+        <label for="customModel">custom model id</label>
+        <input type="text" id="customModel" placeholder="provider/model-name" spellcheck="false" />
+        <div class="help">any model id from openrouter.ai/models</div>
       </div>
-      <div class="mem-filter-bar" id="memFilterBar" style="display:none;"></div>
-      <div class="mem-list" id="memList"></div>
-      <div class="btn-row">
-        <button class="btn" id="addMemBtn">+ add</button>
-        <button class="btn" id="bulkImportBtn">bulk import</button>
-        <button class="btn" id="exportMemBtn">export</button>
-        <button class="btn" id="importMemBtn">import</button>
+
+      <div class="row">
+        <div class="field">
+          <label for="temp">temperature</label>
+          <input type="number" id="temp" step="0.05" min="0" max="2" value="1.0" />
+        </div>
+        <div class="field">
+          <label for="repPenalty">rep penalty</label>
+          <input type="number" id="repPenalty" step="0.05" min="1" max="2" value="1.15" />
+        </div>
       </div>
-      <input type="file" id="importMemFile" accept="application/json" style="display:none;" />
-      <div class="footnote">pinned memories load every turn. others fire when their keywords match what you're saying.</div>
+      <div class="footnote">guide defaults: temperature 1.0, repetition penalty 1.15.</div>
+
     </div>
 
+    <!-- ===== CONTENT TAB ===== -->
+    <div class="tab-pane" data-pane="content">
+
+      <div class="field">
+        <label for="prompt">system prompt</label>
+        <textarea class="prompt" id="prompt" placeholder="paste ekko's prompt here" spellcheck="false"></textarea>
+        <div class="help">this is who he is. paste the full thing.</div>
+      </div>
+
+      <div class="field">
+        <label for="sceneRules">scene writing rules</label>
+        <textarea class="prompt" id="sceneRules" placeholder="optional. paste your scene-writing rules here. only loaded when you're actually doing scene work." spellcheck="false"></textarea>
+        <div class="help">separate from the system prompt. only fires when scene-shape signals are present in your message OR ekko's last reply was a scene.</div>
+      </div>
+
+      <div class="field">
+        <label for="sceneRulesEnabled">scene rules</label>
+        <select id="sceneRulesEnabled">
+          <option value="true">on (smart-load)</option>
+          <option value="false">off</option>
+        </select>
+        <div class="help">on = load when scene work is happening. off = never load (pure conversation mode).</div>
+      </div>
+
+    </div>
+
+    <!-- ===== MEMORY TAB ===== -->
+    <div class="tab-pane" data-pane="memory">
+
+      <div class="field">
+        <label for="ctxLength">context window (last n messages)</label>
+        <input type="number" id="ctxLength" min="2" max="40" value="16" />
+        <div class="help">how many recent messages get sent each turn. higher = more memory, more cost.</div>
+      </div>
+
+      <div class="field">
+        <label for="maxMemInject">max keyword-matched memories per turn</label>
+        <input type="number" id="maxMemInject" min="0" max="10" value="3" />
+        <div class="help">pinned memories always load. this is the cap on extra ones matched by keyword.</div>
+      </div>
+
+      <div class="field">
+        <label for="selfWriteMemory">let ekko write memories</label>
+        <select id="selfWriteMemory">
+          <option value="false">off</option>
+          <option value="true">on</option>
+        </select>
+        <div class="help">when on, ekko can propose new memory blocks in chat. nothing gets saved without your confirmation.</div>
+      </div>
+
+      <div class="mem-section">
+        <div class="mem-section-head">
+          <div class="mem-section-title">memory</div>
+          <div class="mem-count" id="memCountText">0 blocks</div>
+        </div>
+        <input type="text" id="memSearch" class="mem-search" placeholder="search memories…" />
+        <div class="mem-filter-bar" id="memFilterBar" style="display:none;"></div>
+        <div class="mem-list" id="memList"></div>
+        <div class="btn-row">
+          <button class="btn" id="addMemBtn">+ add</button>
+          <button class="btn" id="bulkImportBtn">bulk import</button>
+          <button class="btn" id="exportMemBtn">export</button>
+          <button class="btn" id="importMemBtn">import</button>
+        </div>
+        <input type="file" id="importMemFile" accept="application/json" style="display:none;" />
+        <div class="footnote">pinned memories load every turn. others fire when their keywords match what you're saying.</div>
+      </div>
+
+    </div>
+
+    <!-- ===== INTERFACE TAB ===== -->
+    <div class="tab-pane" data-pane="interface">
+
+      <div class="row">
+        <div class="field">
+          <label for="typingSpeed">typing speed (ms/char)</label>
+          <input type="number" id="typingSpeed" min="0" max="300" step="5" value="40" />
+        </div>
+        <div class="field">
+          <label for="typingPauses">pauses on punctuation</label>
+          <select id="typingPauses">
+            <option value="true">on</option>
+            <option value="false">off</option>
+          </select>
+        </div>
+      </div>
+      <div class="footnote">0 = instant. 25 = brisk. 40 = human typing. 80 = thoughtful. pauses make full stops and line breaks land slower.</div>
+
+    </div>
+
+    <!-- ===== global save/export, shown below all tabs ===== -->
     <div class="divider"></div>
 
     <div class="btn-row">
@@ -1340,7 +1421,7 @@
       </div>
       <div class="field">
         <label for="memKeywords">keywords & tags (comma-separated)</label>
-        <input type="text" id="memKeywords" placeholder="trinity, persona, #craft" />
+        <textarea id="memKeywords" placeholder="trinity, persona, #craft" style="min-height: 60px; max-height: 160px; overflow-y: auto; font-family: inherit; font-size: 14px; padding: 8px 10px; resize: vertical; line-height: 1.4;"></textarea>
         <div class="help">when your message contains any of these (case-insensitive, whole-word), this memory fires. keywords starting with <code>#</code> are treated as tags for organisation only — they don't trigger loading, but you can filter the memory list by them. ignored for triggering if pinned. for scene-priority memories, keywords still fire in normal conversation — they're just bypassed during scene mode, where the memory always loads.</div>
       </div>
       <div class="field">
@@ -1880,6 +1961,8 @@ function newMemId() {
 
 // active tag filter (null = show all). tags are "#foo" in a memory's keywords.
 let activeMemTagFilter = null;
+// active search query (empty = show all). matches title, body, keywords (case-insensitive substring).
+let memSearchQuery = '';
 
 function renderMemList() {
   const list = $('memList');
@@ -1935,10 +2018,19 @@ function renderMemList() {
     return (b.updatedAt || 0) - (a.updatedAt || 0);
   });
 
-  // apply tag filter if active
-  const visible = activeMemTagFilter
+  // apply tag filter first, then search query — both must match if both active
+  let visible = activeMemTagFilter
     ? sorted.filter(m => m.keywords && m.keywords.some(k => k && k.toLowerCase() === activeMemTagFilter))
     : sorted;
+  if (memSearchQuery) {
+    const q = memSearchQuery.toLowerCase();
+    visible = visible.filter(m => {
+      if (m.title && m.title.toLowerCase().includes(q)) return true;
+      if (m.body && m.body.toLowerCase().includes(q)) return true;
+      if (m.keywords && m.keywords.some(k => k && k.toLowerCase().includes(q))) return true;
+      return false;
+    });
+  }
 
   for (const m of visible) {
     const el = document.createElement('div');
@@ -2688,9 +2780,12 @@ async function sendMessage() {
       paintFrame();
 
       // respect user scroll: if they've scrolled up during this stream, don't
-      // yank them back. otherwise keep the caret in view.
-      if (!userHasScrolled) {
-        const main = $('main');
+      // yank them back. checking distance directly (not just the flag) catches
+      // the case where a scroll event hasn't fired yet but the user is clearly
+      // reading something further up.
+      const main = $('main');
+      const distanceFromBottom = main.scrollHeight - main.scrollTop - main.clientHeight;
+      if (!userHasScrolled && distanceFromBottom < 200) {
         main.scrollTop = main.scrollHeight;
       }
 
@@ -2963,6 +3058,9 @@ function openDrawer() {
   drawer.classList.add('open');
   scrim.classList.add('open');
   drawer.setAttribute('aria-hidden', 'false');
+  // restore the previously-active tab if any
+  const saved = localStorage.getItem('ekko_active_settings_tab');
+  if (saved) switchSettingsTab(saved);
 }
 function closeDrawer() {
   drawer.classList.remove('open');
@@ -2973,23 +3071,47 @@ $('settingsBtn').addEventListener('click', openDrawer);
 $('closeDrawer').addEventListener('click', closeDrawer);
 scrim.addEventListener('click', closeDrawer);
 
+// settings tabs
+function switchSettingsTab(tabId) {
+  const tabs = document.querySelectorAll('.settings-tab');
+  const panes = document.querySelectorAll('.tab-pane');
+  let matched = false;
+  tabs.forEach(t => {
+    const isMatch = t.dataset.tab === tabId;
+    t.classList.toggle('active', isMatch);
+    if (isMatch) matched = true;
+  });
+  panes.forEach(p => p.classList.toggle('active', p.dataset.pane === tabId));
+  if (matched) localStorage.setItem('ekko_active_settings_tab', tabId);
+}
+document.querySelectorAll('.settings-tab').forEach(tab => {
+  tab.addEventListener('click', () => switchSettingsTab(tab.dataset.tab));
+});
+
 // model dropdown -> show/hide custom field
 $('model').addEventListener('change', e => {
   $('customModelField').style.display = e.target.value === '__custom__' ? 'flex' : 'none';
 });
 
 // ===== jump to bottom + user scroll tracking =====
+// the bottom threshold is generous (200px) so that small/incidental scrolls
+// while reading near the bottom don't accidentally wrest control from the
+// painter. the user has to scroll up a meaningful amount to count as "taking
+// control" — but once they have, they keep it until they explicitly return.
 $('main').addEventListener('scroll', () => {
   updateJumpBottomVisibility();
-  // if user is more than a bit off the bottom, they've taken control
   const main = $('main');
   const distanceFromBottom = main.scrollHeight - main.scrollTop - main.clientHeight;
-  if (distanceFromBottom > 50) {
+  if (distanceFromBottom > 200) {
+    // user is reading something further up — stop auto-scrolling
     userHasScrolled = true;
-  } else {
-    // back at the bottom → auto-scroll can resume
+  } else if (distanceFromBottom < 20) {
+    // user has explicitly returned to the bottom edge — resume auto-scroll
     userHasScrolled = false;
   }
+  // in the 20–200px middle zone we leave userHasScrolled unchanged. that
+  // way passive height growth from the painter doesn't accidentally toggle
+  // the flag back to false while the user is mid-read.
 }, { passive: true });
 $('jumpBottom').addEventListener('click', () => {
   scrollToBottom(true);
@@ -3170,6 +3292,11 @@ $('deleteMemBtn').addEventListener('click', deleteCurrentMem);
 $('memBody').addEventListener('input', () => {
   updateMemTokenMeter();
   autoSizeMemBody();
+});
+
+$('memSearch').addEventListener('input', (e) => {
+  memSearchQuery = e.target.value.trim();
+  renderMemList();
 });
 
 $('bulkImportBtn').addEventListener('click', openBulkModal);
