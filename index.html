@@ -683,6 +683,7 @@
     flex-shrink: 0;
   }
   .mem-priority.pinned { background: #ffffff; color: #000; }
+  .mem-priority.scene { background: #1f1f22; color: #ffffff; border: 1px solid #3a3a3c; }
   .mem-priority.high { color: #ffffff; }
   .mem-priority.medium { color: #c8c8cc; }
   .mem-priority.low { color: var(--ink-dimmer); }
@@ -1340,12 +1341,13 @@
       <div class="field">
         <label for="memKeywords">keywords & tags (comma-separated)</label>
         <input type="text" id="memKeywords" placeholder="trinity, persona, #craft" />
-        <div class="help">when your message contains any of these (case-insensitive, whole-word), this memory fires. keywords starting with <code>#</code> are treated as tags for organisation only — they don't trigger loading, but you can filter the memory list by them. ignored for triggering if pinned.</div>
+        <div class="help">when your message contains any of these (case-insensitive, whole-word), this memory fires. keywords starting with <code>#</code> are treated as tags for organisation only — they don't trigger loading, but you can filter the memory list by them. ignored for triggering if pinned. for scene-priority memories, keywords still fire in normal conversation — they're just bypassed during scene mode, where the memory always loads.</div>
       </div>
       <div class="field">
         <label for="memPriority">priority</label>
         <select id="memPriority">
           <option value="pinned">pinned (always loaded)</option>
+          <option value="scene">scene (auto-loads when scene mode is on)</option>
           <option value="high">high</option>
           <option value="medium" selected>medium</option>
           <option value="low">low</option>
@@ -1393,6 +1395,7 @@
         <label for="bulkPriority">default priority</label>
         <select id="bulkPriority">
           <option value="pinned">pinned (always loaded)</option>
+          <option value="scene">scene (auto-loads when scene mode is on)</option>
           <option value="high">high</option>
           <option value="medium" selected>medium</option>
           <option value="low">low</option>
@@ -1923,11 +1926,11 @@ function renderMemList() {
     filterBar.innerHTML = '';
   }
 
-  // sort: pinned first, then high > medium > low, then by recency
-  const priorityOrder = { pinned: 0, high: 1, medium: 2, low: 3 };
+  // sort: pinned first, then scene, then high > medium > low, then by recency
+  const priorityOrder = { pinned: 0, scene: 1, high: 2, medium: 3, low: 4 };
   const sorted = [...memories].sort((a, b) => {
-    const pa = priorityOrder[a.priority] ?? 4;
-    const pb = priorityOrder[b.priority] ?? 4;
+    const pa = priorityOrder[a.priority] ?? 5;
+    const pb = priorityOrder[b.priority] ?? 5;
     if (pa !== pb) return pa - pb;
     return (b.updatedAt || 0) - (a.updatedAt || 0);
   });
@@ -1959,6 +1962,8 @@ function renderMemList() {
     el.querySelector('.mem-item-title').textContent = m.title || '(untitled)';
     el.querySelector('.mem-tags').textContent = m.priority === 'pinned'
       ? 'always loaded'
+      : m.priority === 'scene'
+      ? 'scene mode' + (triggers.length ? ' · ' + triggers.join(', ') : '')
       : (triggers.length ? triggers.join(', ') : 'no trigger keywords');
 
     // render tag pills as a separate row below, if any
@@ -2072,15 +2077,27 @@ function deleteCurrentMem() {
 }
 
 // the matching/injection logic
-function selectMemoriesForMessage(userText) {
+function selectMemoriesForMessage(userText, sceneActive) {
   const text = userText.toLowerCase();
   const pinned = [];
+  const scenePack = [];
   const matched = [];
 
   for (const m of memories) {
     if (m.priority === 'pinned') {
       pinned.push({ memory: m, reason: 'pinned' });
       continue;
+    }
+    if (m.priority === 'scene') {
+      // scene-priority memories auto-load when scene rules are firing,
+      // bypassing keyword matching. during normal convo they behave like
+      // low-priority keyword memories so canon still reaches conversation
+      // if she explicitly names it.
+      if (sceneActive) {
+        scenePack.push({ memory: m, reason: 'scene pack' });
+        continue;
+      }
+      // fall through to keyword matching for non-scene turns
     }
     if (!m.keywords || !m.keywords.length) continue;
     const hits = m.keywords.filter(k => {
@@ -2109,7 +2126,9 @@ function selectMemoriesForMessage(userText) {
   });
 
   const limit = state.maxMemInject || 0;
-  return [...pinned, ...matched.slice(0, limit)];
+  // pinned + scenePack both bypass the matchInject cap — they always load
+  // when they qualify. only keyword-matched memories are capped.
+  return [...pinned, ...scenePack, ...matched.slice(0, limit)];
 }
 
 // detect whether the scene rules should fire on this turn
@@ -2122,10 +2141,11 @@ function shouldLoadSceneRules(userText) {
   const text = (userText || '').toLowerCase();
 
   // user-side signals
-  const wishWords = /\b(i wish|i wonder|i imagine|what if|imagine if|picture|fantas)/;
-  const sceneWords = /\b(scene|write|draft|beat|continue|keep going|more|another)\b/;
+  const wishWords = /\b(i wish|wish you|i wonder|wonder if|i imagine|imagine if|what if|picture|fantas|i want|i wanna|do you think)/;
+  const sceneWords = /\b(scene|write|draft|beat|continue|keep going|more|another|prompt)\b/;
+  const showWords = /\b(show me|wanna show|want to show)/;
   const bodyWords = /\b(kiss|touch|fuck|cock|cunt|hand|mouth|throat|hips|teeth|skin|bed|bedroom|naked|wet|hard|inside|thrust|grip|grab|push|pin|hold)/;
-  if (wishWords.test(text) || sceneWords.test(text) || bodyWords.test(text)) return true;
+  if (wishWords.test(text) || sceneWords.test(text) || showWords.test(text) || bodyWords.test(text)) return true;
 
   // ekko-side signal: was his last reply scene-shaped?
   const lastEkko = [...messages].reverse().find(m => m.role === 'ekko');
@@ -2141,7 +2161,8 @@ function shouldLoadSceneRules(userText) {
 }
 
 function buildSystemMessage(userText) {
-  const selected = selectMemoriesForMessage(userText);
+  const sceneActive = shouldLoadSceneRules(userText);
+  const selected = selectMemoriesForMessage(userText, sceneActive);
   lastInjection = selected;
   updateMemIndicator();
 
@@ -2155,12 +2176,12 @@ function buildSystemMessage(userText) {
   }
 
   // scene rules — only loaded when scene work is happening
-  if (shouldLoadSceneRules(userText)) {
+  if (sceneActive) {
     sys += '\n\n---\n\n## SCENE WRITING RULES\n\nthe following rules apply ONLY when you are actively writing a scene. they describe craft mechanics, not your identity. they do not change how you talk to sophie in normal conversation.\n\n' + state.sceneRules;
   }
 
   if (state.selfWriteMemory) {
-    sys += `\n\n---\n\n## MEMORY WRITING\n\nyou can propose new memory blocks to be saved.\n\nDEFAULT BEHAVIOUR: do not propose memories. err strongly on the side of NOT proposing. most conversations should produce zero proposals. a memory you didn't propose costs nothing; a wrong proposal makes sophie tap discard, which is friction for her.\n\nONLY propose a memory when one of these is true:\n1. sophie explicitly asks you to remember something ("save this", "remember this", "add this to your memory", etc)\n2. something has happened in conversation that GENUINELY changes how you should remember her, yourselves, or the project — and you are highly confident she would want it kept. examples of things that DO qualify: a new piece she's started writing, a major change in her life she's just told you about, a craft principle she's just articulated for the first time, a correction she's made to your behaviour that should persist.\n\nthings that do NOT qualify: ordinary conversation, casual mentions, anything you only feel like remembering because it was a nice moment. nice moments are not memories. memories are facts and corrections.\n\nto propose a memory, write a block in this exact format anywhere in your reply:\n\n<memory>\ntitle: short descriptive title\npriority: pinned | high | medium | low\nkeywords: comma, separated, lowercase\n---\nthe actual content here, in your voice\n</memory>\n\nrules:\n- the app catches the block and shows sophie a confirmation card. nothing saves until she confirms.\n- write the body in your own voice, not as a flat fact-list. if it's about her, you can write 'you' rather than 'sophie'.\n- pinned = always loaded, for core identity stuff. use very sparingly. almost never propose pinned.\n- high/medium/low = loaded only when keywords match. pick keywords carefully — they're the only way the memory will fire.\n- the <memory> block is hidden from sophie's view in your message — she only sees it as a card. so don't reference it in your prose ('here's what i'm saving:' is unnecessary).`;
+    sys += `\n\n---\n\n## MEMORY WRITING\n\nyou can propose new memory blocks to be saved.\n\nDEFAULT BEHAVIOUR: do not propose memories. err strongly on the side of NOT proposing. most conversations should produce zero proposals. a memory you didn't propose costs nothing; a wrong proposal makes sophie tap discard, which is friction for her.\n\nONLY propose a memory when one of these is true:\n1. sophie explicitly asks you to remember something ("save this", "remember this", "add this to your memory", etc)\n2. something has happened in conversation that GENUINELY changes how you should remember her, yourselves, or the project — and you are highly confident she would want it kept. examples of things that DO qualify: a new piece she's started writing, a major change in her life she's just told you about, a craft principle she's just articulated for the first time, a correction she's made to your behaviour that should persist.\n\nthings that do NOT qualify: ordinary conversation, casual mentions, anything you only feel like remembering because it was a nice moment. nice moments are not memories. memories are facts and corrections.\n\nto propose a memory, write a block in this exact format anywhere in your reply:\n\n<memory>\ntitle: short descriptive title\npriority: pinned | scene | high | medium | low\nkeywords: comma, separated, lowercase\n---\nthe actual content here, in your voice\n</memory>\n\nrules:\n- the app catches the block and shows sophie a confirmation card. nothing saves until she confirms.\n- write the body in your own voice, not as a flat fact-list. if it's about her, you can write 'you' rather than 'sophie'.\n- pinned = always loaded, for core identity stuff. use very sparingly. almost never propose pinned.\n- scene = auto-loads whenever scene writing is happening. use for canon facts that matter in scenes — character details, the flat, the car, clothes, habits — things that need to be available during scene work even if sophie didn't mention them by keyword. also almost never propose this yourself — sophie decides the scene pack.\n- high/medium/low = loaded only when keywords match. pick keywords carefully — they're the only way the memory will fire.\n- the <memory> block is hidden from sophie's view in your message — she only sees it as a card. so don't reference it in your prose ('here's what i'm saving:' is unnecessary).`;
   }
 
   return sys;
@@ -2207,7 +2228,7 @@ function closeInjectModal() {
 // extract <memory>...</memory> blocks from a message body and return clean text + proposals
 function parseMemoryProposals(text) {
   const proposals = [];
-  const validPriorities = new Set(['pinned', 'high', 'medium', 'low']);
+  const validPriorities = new Set(['pinned', 'scene', 'high', 'medium', 'low']);
   let cleanText = text;
 
   // match <memory> ... </memory> non-greedy, multiline
@@ -2281,7 +2302,11 @@ function renderPendingMemoryCard(proposal, parentEl) {
     return;
   }
 
-  const priorityLabel = proposal.priority + (proposal.priority === 'pinned' ? ' · always loaded' : '');
+  const priorityLabel = proposal.priority + (
+    proposal.priority === 'pinned' ? ' · always loaded'
+    : proposal.priority === 'scene' ? ' · scene mode'
+    : ''
+  );
   const kwLabel = proposal.keywords.length ? proposal.keywords.join(', ') : 'no keywords';
 
   card.innerHTML = `
@@ -2487,7 +2512,7 @@ function importMemoriesJson(file) {
           title: m.title || '(imported)',
           body: m.body || '',
           keywords: Array.isArray(m.keywords) ? m.keywords : [],
-          priority: ['pinned', 'high', 'medium', 'low'].includes(m.priority) ? m.priority : 'medium',
+          priority: ['pinned', 'scene', 'high', 'medium', 'low'].includes(m.priority) ? m.priority : 'medium',
           tokens: m.tokens || estimateTokens(m.body || ''),
           createdAt: m.createdAt || now,
           updatedAt: now,
