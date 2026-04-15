@@ -107,7 +107,9 @@
     overflow-y: auto;
     overflow-x: hidden;
     -webkit-overflow-scrolling: touch;
-    scroll-behavior: smooth;
+    /* no scroll-behavior here — smooth-scroll animations fight with user
+       touch input during message streaming. instant jumps are the right
+       behaviour for an auto-scroll-during-stream system. */
   }
   .chat {
     max-width: 720px;
@@ -1824,6 +1826,11 @@ function scrollToBottom(force) {
 // tap jump-to-bottom.
 let userHasScrolled = false;
 
+// track whether the user has an active touch on the chat scroll area.
+// this is the earliest signal we have that they're trying to take control —
+// touch events fire before scroll events do.
+let userIsTouching = false;
+
 // jump-to-bottom button visibility
 function updateJumpBottomVisibility() {
   const main = $('main');
@@ -2782,10 +2789,12 @@ async function sendMessage() {
       // respect user scroll: if they've scrolled up during this stream, don't
       // yank them back. checking distance directly (not just the flag) catches
       // the case where a scroll event hasn't fired yet but the user is clearly
-      // reading something further up.
+      // reading something further up. also bail out if there's an active touch
+      // — touch events fire before scroll events, so this is the earliest signal
+      // that the user is trying to take control.
       const main = $('main');
       const distanceFromBottom = main.scrollHeight - main.scrollTop - main.clientHeight;
-      if (!userHasScrolled && distanceFromBottom < 200) {
+      if (!userHasScrolled && !userIsTouching && distanceFromBottom < 200) {
         main.scrollTop = main.scrollHeight;
       }
 
@@ -3113,6 +3122,16 @@ $('main').addEventListener('scroll', () => {
   // way passive height growth from the painter doesn't accidentally toggle
   // the flag back to false while the user is mid-read.
 }, { passive: true });
+
+// touch tracking: if the user has a finger on the screen, the painter should
+// not auto-scroll. this catches the gap between finger-down and the first
+// scroll event firing, which on touch devices can be 100ms+ — long enough
+// for several painter characters to land and re-snap to bottom before the
+// scroll event tells us the user took control. (declared at top of script.)
+$('main').addEventListener('touchstart', () => { userIsTouching = true; }, { passive: true });
+$('main').addEventListener('touchend',   () => { userIsTouching = false; }, { passive: true });
+$('main').addEventListener('touchcancel',() => { userIsTouching = false; }, { passive: true });
+
 $('jumpBottom').addEventListener('click', () => {
   scrollToBottom(true);
 });
