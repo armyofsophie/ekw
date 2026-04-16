@@ -194,34 +194,19 @@
     font-style: italic;
   }
 
-  /* each paragraph in an ekko message is its own block. during streaming,
-     new paragraphs fade in from 0 → 1 opacity (with a tiny upward translate)
-     over 350ms as they first land in the dom. already-rendered paragraphs
-     stay put and do not re-animate. the .ekko-para-static variant (applied
-     on re-render of saved messages) skips the animation. */
-  .msg.ekko .body .ekko-para {
-    margin: 0;
-    padding: 0;
-    animation: fadeInPara 350ms ease-out both;
-    will-change: opacity, transform;
+  /* each character painted during streaming becomes a <span class="ekko-char">
+     that fades in over 400ms when first added to the dom. the typewriter
+     delay between characters (40ms default) is much shorter than the fade
+     duration, so multiple characters are always mid-fade at the same time —
+     producing a smooth "wave of reveal" as content arrives. matches
+     chatgpt's streaming feel. no transform because at character level it
+     reads as jitter; just opacity. */
+  .msg.ekko .body .ekko-char {
+    animation: fadeInChar 400ms ease-out both;
   }
-  .msg.ekko .body .ekko-para + .ekko-para {
-    /* blank-line separation between paragraphs, matching the \n\n authoring
-       style. looks like a paragraph break, not just a top margin. */
-    margin-top: 1em;
-  }
-  .msg.ekko .body .ekko-para.ekko-para-static {
-    animation: none;
-  }
-  @keyframes fadeInPara {
-    from {
-      opacity: 0;
-      transform: translateY(4px);
-    }
-    to {
-      opacity: 1;
-      transform: translateY(0);
-    }
+  @keyframes fadeInChar {
+    from { opacity: 0; }
+    to   { opacity: 1; }
   }
 
   /* the blinking caret while streaming */
@@ -1820,15 +1805,7 @@ function renderMsg(m) {
     const body = document.createElement('div');
     body.className = 'body';
     if (m.role === 'ekko') {
-      // render as paragraph structure matching the streaming painter output,
-      // but without the fade-in animation (these are already-written messages).
-      const paragraphs = m.content.split(/\n\s*\n/);
-      for (const para of paragraphs) {
-        const p = document.createElement('div');
-        p.className = 'ekko-para ekko-para-static';
-        p.innerHTML = formatEkko(para);
-        body.appendChild(p);
-      }
+      body.innerHTML = formatEkko(m.content);
     } else {
       body.textContent = m.content;
     }
@@ -1983,6 +1960,7 @@ function editUserMessageAt(idx) {
   }
   // truncate the conversation back to before this message
   messages = messages.slice(0, idx);
+  markIntentionalTruncation();
   saveMessages();
   render();
   // populate the input with just the typed text
@@ -2021,6 +1999,7 @@ function regenerateEkkoMessageAt(idx) {
   }
   // truncate back to just before the user message
   messages = messages.slice(0, userIdx);
+  markIntentionalTruncation();
   saveMessages();
   render();
   // re-send by populating the input and triggering send
@@ -2807,12 +2786,13 @@ async function sendMessage() {
     }
   };
 
-  // tracks how many paragraphs have been finalized in the dom. each finalized
-  // paragraph is a fixed <p class="ekko-para"> child of streamBody and does
-  // not re-render on further paintFrame calls — only the last (in-progress)
-  // paragraph updates. this is what allows the per-paragraph fade-in to work
-  // without restarting on every character.
-  let renderedParaCount = 0;
+  // track how many characters we've actually rendered as spans in the dom.
+  // the painter keeps this in sync with paintedLength — each new character
+  // becomes a <span class="ekko-char"> which triggers a css fade-in animation.
+  // since the fade-duration is longer than the inter-character typing delay,
+  // fades overlap and create a smooth "wave of reveal" effect as characters
+  // emit — the same effect chatgpt uses.
+  let domCharCount = 0;
 
   function ensureBubble() {
     if (bubbleCreated) return;
@@ -2831,8 +2811,7 @@ async function sendMessage() {
     const raw = bufferedText.slice(0, paintedLength);
 
     // hide any in-progress or completed <memory> blocks from the visible stream.
-    // we strip from <memory> to either </memory> or end-of-string, replacing
-    // with a small marker so the user knows something is being written.
+    // we strip from <memory> to either </memory> or end-of-string.
     let visible = raw;
     let writingMemory = false;
     const openIdx = visible.search(/<memory>/i);
@@ -2851,53 +2830,52 @@ async function sendMessage() {
 
     const showCaret = paintedLength < bufferedText.length || !apiDone;
 
-    // split visible text into paragraphs on blank-line boundaries. single \n
-    // stays within a paragraph (renders as line break via pre-wrap). blank
-    // lines (\n\n) start a new paragraph.
-    const paragraphs = visible.split(/\n\s*\n/);
+    // if memory stripping has changed the visible content in a way that
+    // invalidates previously-rendered characters (e.g. a <memory> block
+    // just closed and got removed), we have to rebuild from scratch.
+    // detect this: the first domCharCount characters of the current visible
+    // text should match what we already rendered. if not, reset.
+    if (streamBody.dataset.renderedText && !visible.startsWith(streamBody.dataset.renderedText)) {
+      streamBody.innerHTML = '';
+      domCharCount = 0;
+    }
 
-    // when paragraphs grows past the count of dom paragraphs we already have,
-    // any pre-existing tail paragraph needs to be promoted to a finalised
-    // paragraph (caret stripped, class removed) before we create new ones.
-    // this is the bit that was buggy before: previously each new paragraph
-    // created a new tail, leaving the old one in place still labelled tail
-    // and still showing its caret.
-    while (renderedParaCount < paragraphs.length - 1) {
-      // get or create the element for paragraph at index renderedParaCount.
-      // by construction this is the current tail (or there is no tail yet
-      // and we're creating a fresh finalised paragraph from scratch).
-      let para = streamBody.querySelector('.ekko-tail');
-      if (para) {
-        // promote: lock its content to the now-known-final text, strip caret,
-        // remove tail class so it stops being treated as the live one.
-        para.innerHTML = formatEkko(paragraphs[renderedParaCount]);
-        para.classList.remove('ekko-tail');
-      } else {
-        // no tail existed — create a finalised paragraph directly.
-        para = document.createElement('div');
-        para.className = 'ekko-para';
-        para.innerHTML = formatEkko(paragraphs[renderedParaCount]);
-        streamBody.appendChild(para);
+    // append any new characters as individual spans. each span triggers the
+    // fadeInChar keyframe on mount. the typewriter delay between characters
+    // is shorter than the fade duration, so fades overlap visually.
+    if (visible.length > domCharCount) {
+      const newChars = visible.slice(domCharCount);
+      const frag = document.createDocumentFragment();
+      for (const ch of newChars) {
+        const span = document.createElement('span');
+        span.className = 'ekko-char';
+        span.textContent = ch;
+        frag.appendChild(span);
       }
-      renderedParaCount++;
+      // remove old caret/indicator if present before appending new chars
+      const oldCaret = streamBody.querySelector('.caret, .memory-indicator');
+      if (oldCaret) oldCaret.remove();
+      streamBody.appendChild(frag);
+      domCharCount = visible.length;
     }
 
-    // render or update the tail (live) paragraph — the one currently being
-    // painted. only one of these exists in the dom at a time.
-    let tail = streamBody.querySelector('.ekko-tail');
-    if (!tail) {
-      tail = document.createElement('div');
-      tail.className = 'ekko-para ekko-tail';
-      streamBody.appendChild(tail);
-    }
-    const tailText = paragraphs[paragraphs.length - 1] || '';
-    let tailHtml = formatEkko(tailText);
+    streamBody.dataset.renderedText = visible;
+
+    // update trailing caret / memory-writing indicator. remove any existing
+    // one first so we don't pile them up.
+    const existingTrail = streamBody.querySelector('.caret, .memory-indicator');
+    if (existingTrail) existingTrail.remove();
     if (writingMemory) {
-      tailHtml += '<div style="font-size: 11px; color: var(--ink-dimmer); font-style: italic; margin-top: 8px;">writing a memory…</div>';
+      const ind = document.createElement('div');
+      ind.className = 'memory-indicator';
+      ind.style.cssText = 'font-size: 11px; color: var(--ink-dimmer); font-style: italic; margin-top: 8px;';
+      ind.textContent = 'writing a memory…';
+      streamBody.appendChild(ind);
     } else if (showCaret) {
-      tailHtml += '<span class="caret"></span>';
+      const caret = document.createElement('span');
+      caret.className = 'caret';
+      streamBody.appendChild(caret);
     }
-    tail.innerHTML = tailHtml;
   }
 
   // the painter — drips chars out at the configured speed
@@ -3000,14 +2978,13 @@ async function sendMessage() {
       // parse out any memory proposals
       const { cleanText, proposals } = parseMemoryProposals(bufferedText);
 
-      // the streaming painter already rendered the clean text into
-      // paragraph-structured dom with fade-ins. we just need to remove
-      // the trailing caret (if any) to finalise. rebuilding the whole
-      // innerHTML here would destroy the paragraph structure and restart
-      // any in-progress fade animations.
+      // now that streaming is complete, replace the character-span output with
+      // the formatted version (applies bold, italic, blockquote, hr). this
+      // also removes the trailing caret automatically. since the content is
+      // the same text the user has already seen, there's no visual disruption
+      // — formatting appears instantly without animation.
       if (streamBody) {
-        const caret = streamBody.querySelector('.caret');
-        if (caret) caret.remove();
+        streamBody.innerHTML = formatEkko(cleanText);
       }
 
       // save the message — store both the clean text and any proposals so they persist
@@ -3039,17 +3016,8 @@ async function sendMessage() {
       if (bufferedText.length > 0) {
         const { cleanText, proposals } = parseMemoryProposals(bufferedText);
         if (streamBody) {
-          // remove caret and append the stopped indicator to the last
-          // rendered paragraph, preserving the paragraph structure.
-          const caret = streamBody.querySelector('.caret');
-          if (caret) caret.remove();
-          const lastPara = streamBody.querySelector('.ekko-para:last-child');
-          if (lastPara) {
-            const stoppedMark = document.createElement('span');
-            stoppedMark.style.cssText = 'color: var(--ink-dimmer); font-size: 11px; font-style: italic;';
-            stoppedMark.textContent = ' — stopped';
-            lastPara.appendChild(stoppedMark);
-          }
+          // replace character-span output with formatted final text + stopped mark
+          streamBody.innerHTML = formatEkko(cleanText) + '<span style="color: var(--ink-dimmer); font-size: 11px; font-style: italic;"> — stopped</span>';
         }
         const msgRecord = { role: 'ekko', content: cleanText };
         if (proposals.length > 0) msgRecord.proposals = proposals;
@@ -3399,6 +3367,7 @@ $('newChatBtn').addEventListener('click', () => {
   if (messages.length === 0) return;
   if (!confirm('start a new chat? current one will be cleared.')) return;
   messages = [];
+  markIntentionalTruncation();
   saveMessages();
   render();
   showToast('new chat');
@@ -3406,6 +3375,7 @@ $('newChatBtn').addEventListener('click', () => {
 $('clearBtn').addEventListener('click', () => {
   if (!confirm('clear all messages in this chat?')) return;
   messages = [];
+  markIntentionalTruncation();
   saveMessages();
   render();
   showToast('cleared');
@@ -3688,6 +3658,15 @@ async function isLocalStale() {
   }
 }
 
+// when the user intentionally shortens the conversation (edit, regen, delete,
+// new chat, clear), the next push will legitimately have fewer messages than
+// the cloud. we mark those pushes as intentional so the staleness check is
+// skipped for that one sync. flag resets as soon as it's consumed.
+let skipStaleCheckOnce = false;
+function markIntentionalTruncation() {
+  skipStaleCheckOnce = true;
+}
+
 // sync conflict modal — shown when a save would overwrite newer cloud data.
 // stores the pending callbacks on the modal element itself so the buttons
 // (which are wired up once at startup) know what to do.
@@ -3745,6 +3724,14 @@ async function pushSettingsToCloud(stateObj) {
 }
 
 async function pushMessagesToCloud(msgs) {
+  // intentional truncations (edit/regen/delete/clear/new-chat) legitimately
+  // shorten the conversation, so the cloud having more messages than local
+  // is expected and not a conflict. the flag is consumed on use.
+  if (skipStaleCheckOnce) {
+    skipStaleCheckOnce = false;
+    await doPushMessages(msgs);
+    return;
+  }
   // staleness guard: if cloud has more messages than what we're about to push,
   // another device wrote since we last fetched. surface the conflict to the
   // user instead of blindly wiping their other device's work.
