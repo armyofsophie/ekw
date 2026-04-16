@@ -195,27 +195,33 @@
   }
 
   /* each paragraph in an ekko message is its own block. during streaming,
-     new paragraphs fade in from 0 → 1 opacity over 250ms as they first
-     land in the dom. already-rendered paragraphs stay put and do not
-     re-animate. the .ekko-para-static variant (applied on re-render of
-     saved messages) skips the animation — the content was already seen,
-     no need to re-animate it on every app load. */
+     new paragraphs fade in from 0 → 1 opacity (with a tiny upward translate)
+     over 350ms as they first land in the dom. already-rendered paragraphs
+     stay put and do not re-animate. the .ekko-para-static variant (applied
+     on re-render of saved messages) skips the animation. */
   .msg.ekko .body .ekko-para {
     margin: 0;
     padding: 0;
-    animation: fadeInPara 250ms ease-out both;
+    animation: fadeInPara 350ms ease-out both;
+    will-change: opacity, transform;
   }
   .msg.ekko .body .ekko-para + .ekko-para {
-    /* blank-line separation between paragraphs, matching the original
-       \n\n authoring style. looks like a paragraph break, not a margin. */
+    /* blank-line separation between paragraphs, matching the \n\n authoring
+       style. looks like a paragraph break, not just a top margin. */
     margin-top: 1em;
   }
-  .msg.ekko .body .ekko-para-static {
+  .msg.ekko .body .ekko-para.ekko-para-static {
     animation: none;
   }
   @keyframes fadeInPara {
-    from { opacity: 0; }
-    to   { opacity: 1; }
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
   }
 
   /* the blinking caret while streaming */
@@ -1818,7 +1824,7 @@ function renderMsg(m) {
       // but without the fade-in animation (these are already-written messages).
       const paragraphs = m.content.split(/\n\s*\n/);
       for (const para of paragraphs) {
-        const p = document.createElement('p');
+        const p = document.createElement('div');
         p.className = 'ekko-para ekko-para-static';
         p.innerHTML = formatEkko(para);
         body.appendChild(p);
@@ -2845,32 +2851,45 @@ async function sendMessage() {
 
     const showCaret = paintedLength < bufferedText.length || !apiDone;
 
-    // split the visible text into paragraphs on blank-line boundaries.
-    // single \n stays within a paragraph (renders as a line break via
-    // white-space: pre-wrap in css). a paragraph is any block separated
-    // by one or more blank lines.
+    // split visible text into paragraphs on blank-line boundaries. single \n
+    // stays within a paragraph (renders as line break via pre-wrap). blank
+    // lines (\n\n) start a new paragraph.
     const paragraphs = visible.split(/\n\s*\n/);
 
-    // finalise any paragraphs that are no longer the tail. these get
-    // locked into the dom with the fade-in animation and never re-render.
+    // when paragraphs grows past the count of dom paragraphs we already have,
+    // any pre-existing tail paragraph needs to be promoted to a finalised
+    // paragraph (caret stripped, class removed) before we create new ones.
+    // this is the bit that was buggy before: previously each new paragraph
+    // created a new tail, leaving the old one in place still labelled tail
+    // and still showing its caret.
     while (renderedParaCount < paragraphs.length - 1) {
-      const para = document.createElement('p');
-      para.className = 'ekko-para';
-      para.innerHTML = formatEkko(paragraphs[renderedParaCount]);
-      streamBody.appendChild(para);
+      // get or create the element for paragraph at index renderedParaCount.
+      // by construction this is the current tail (or there is no tail yet
+      // and we're creating a fresh finalised paragraph from scratch).
+      let para = streamBody.querySelector('.ekko-tail');
+      if (para) {
+        // promote: lock its content to the now-known-final text, strip caret,
+        // remove tail class so it stops being treated as the live one.
+        para.innerHTML = formatEkko(paragraphs[renderedParaCount]);
+        para.classList.remove('ekko-tail');
+      } else {
+        // no tail existed — create a finalised paragraph directly.
+        para = document.createElement('div');
+        para.className = 'ekko-para';
+        para.innerHTML = formatEkko(paragraphs[renderedParaCount]);
+        streamBody.appendChild(para);
+      }
       renderedParaCount++;
     }
 
-    // render or update the tail paragraph (the one currently being painted).
-    // it lives as the last .ekko-para element; create if it doesn't exist yet.
-    let tail = streamBody.querySelector('.ekko-para:last-child.ekko-tail');
+    // render or update the tail (live) paragraph — the one currently being
+    // painted. only one of these exists in the dom at a time.
+    let tail = streamBody.querySelector('.ekko-tail');
     if (!tail) {
-      tail = document.createElement('p');
+      tail = document.createElement('div');
       tail.className = 'ekko-para ekko-tail';
       streamBody.appendChild(tail);
     }
-    // when the tail becomes a finalised paragraph, it will be recreated above.
-    // until then it keeps its content refreshed from the current last paragraph.
     const tailText = paragraphs[paragraphs.length - 1] || '';
     let tailHtml = formatEkko(tailText);
     if (writingMemory) {
