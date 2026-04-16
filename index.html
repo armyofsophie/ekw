@@ -194,6 +194,30 @@
     font-style: italic;
   }
 
+  /* each paragraph in an ekko message is its own block. during streaming,
+     new paragraphs fade in from 0 → 1 opacity over 250ms as they first
+     land in the dom. already-rendered paragraphs stay put and do not
+     re-animate. the .ekko-para-static variant (applied on re-render of
+     saved messages) skips the animation — the content was already seen,
+     no need to re-animate it on every app load. */
+  .msg.ekko .body .ekko-para {
+    margin: 0;
+    padding: 0;
+    animation: fadeInPara 250ms ease-out both;
+  }
+  .msg.ekko .body .ekko-para + .ekko-para {
+    /* blank-line separation between paragraphs, matching the original
+       \n\n authoring style. looks like a paragraph break, not a margin. */
+    margin-top: 1em;
+  }
+  .msg.ekko .body .ekko-para-static {
+    animation: none;
+  }
+  @keyframes fadeInPara {
+    from { opacity: 0; }
+    to   { opacity: 1; }
+  }
+
   /* the blinking caret while streaming */
   .msg.ekko .body .caret {
     display: inline-block;
@@ -1790,7 +1814,15 @@ function renderMsg(m) {
     const body = document.createElement('div');
     body.className = 'body';
     if (m.role === 'ekko') {
-      body.innerHTML = formatEkko(m.content);
+      // render as paragraph structure matching the streaming painter output,
+      // but without the fade-in animation (these are already-written messages).
+      const paragraphs = m.content.split(/\n\s*\n/);
+      for (const para of paragraphs) {
+        const p = document.createElement('p');
+        p.className = 'ekko-para ekko-para-static';
+        p.innerHTML = formatEkko(para);
+        body.appendChild(p);
+      }
     } else {
       body.textContent = m.content;
     }
@@ -1847,6 +1879,24 @@ function scrollToBottom() {
   requestAnimationFrame(() => {
     const main = $('main');
     main.scrollTop = main.scrollHeight;
+  });
+}
+
+// scroll a given message element to the top of the viewport — used when
+// the user sends a new message, so their message lands at top and ekko's
+// reply paints into the empty space below. matches chatgpt's ui pattern.
+// if there isn't enough content below the message to push it to the top,
+// the browser will clamp at scrollHeight — that's fine, falls back to
+// "scroll as far as possible."
+function scrollMessageToTop(el) {
+  if (!el) return;
+  requestAnimationFrame(() => {
+    const main = $('main');
+    // offset accounts for the 24px top padding of .chat plus a small gap
+    // so the message isn't flush against the very top edge.
+    const offset = 16;
+    const target = el.offsetTop - offset;
+    main.scrollTop = target;
   });
 }
 
@@ -2686,10 +2736,12 @@ async function sendMessage() {
   // re-render so action buttons attach to the new last user message
   // and the previous one's buttons get removed
   render();
-  // scroll to bottom — this is the one place in the painter flow where
-  // we do auto-scroll, because the user just sent a message and wants to
-  // see their own message land at the bottom.
-  scrollToBottom();
+  // scroll the newly-sent user message to the top of the viewport so that
+  // ekko's reply will paint in below it. this hides ekko's previous reply
+  // above the fold until the user scrolls back up — matches chatgpt's
+  // "reply focuses on the current turn" behaviour.
+  const userMsgEls = chatEl.querySelectorAll('.msg.user');
+  scrollMessageToTop(userMsgEls[userMsgEls.length - 1]);
 
   isStreaming = true;
   statusDot.classList.remove('idle');
@@ -2749,6 +2801,13 @@ async function sendMessage() {
     }
   };
 
+  // tracks how many paragraphs have been finalized in the dom. each finalized
+  // paragraph is a fixed <p class="ekko-para"> child of streamBody and does
+  // not re-render on further paintFrame calls — only the last (in-progress)
+  // paragraph updates. this is what allows the per-paragraph fade-in to work
+  // without restarting on every character.
+  let renderedParaCount = 0;
+
   function ensureBubble() {
     if (bubbleCreated) return;
     removeTyping();
@@ -2785,13 +2844,41 @@ async function sendMessage() {
     }
 
     const showCaret = paintedLength < bufferedText.length || !apiDone;
-    let html = formatEkko(visible);
-    if (writingMemory) {
-      html += '<div style="font-size: 11px; color: var(--ink-dimmer); font-style: italic; margin-top: 8px;">writing a memory…</div>';
-    } else if (showCaret) {
-      html += '<span class="caret"></span>';
+
+    // split the visible text into paragraphs on blank-line boundaries.
+    // single \n stays within a paragraph (renders as a line break via
+    // white-space: pre-wrap in css). a paragraph is any block separated
+    // by one or more blank lines.
+    const paragraphs = visible.split(/\n\s*\n/);
+
+    // finalise any paragraphs that are no longer the tail. these get
+    // locked into the dom with the fade-in animation and never re-render.
+    while (renderedParaCount < paragraphs.length - 1) {
+      const para = document.createElement('p');
+      para.className = 'ekko-para';
+      para.innerHTML = formatEkko(paragraphs[renderedParaCount]);
+      streamBody.appendChild(para);
+      renderedParaCount++;
     }
-    streamBody.innerHTML = html;
+
+    // render or update the tail paragraph (the one currently being painted).
+    // it lives as the last .ekko-para element; create if it doesn't exist yet.
+    let tail = streamBody.querySelector('.ekko-para:last-child.ekko-tail');
+    if (!tail) {
+      tail = document.createElement('p');
+      tail.className = 'ekko-para ekko-tail';
+      streamBody.appendChild(tail);
+    }
+    // when the tail becomes a finalised paragraph, it will be recreated above.
+    // until then it keeps its content refreshed from the current last paragraph.
+    const tailText = paragraphs[paragraphs.length - 1] || '';
+    let tailHtml = formatEkko(tailText);
+    if (writingMemory) {
+      tailHtml += '<div style="font-size: 11px; color: var(--ink-dimmer); font-style: italic; margin-top: 8px;">writing a memory…</div>';
+    } else if (showCaret) {
+      tailHtml += '<span class="caret"></span>';
+    }
+    tail.innerHTML = tailHtml;
   }
 
   // the painter — drips chars out at the configured speed
@@ -2894,8 +2981,15 @@ async function sendMessage() {
       // parse out any memory proposals
       const { cleanText, proposals } = parseMemoryProposals(bufferedText);
 
-      // re-render the bubble with the cleaned text (no <memory> blocks visible)
-      streamBody.innerHTML = formatEkko(cleanText);
+      // the streaming painter already rendered the clean text into
+      // paragraph-structured dom with fade-ins. we just need to remove
+      // the trailing caret (if any) to finalise. rebuilding the whole
+      // innerHTML here would destroy the paragraph structure and restart
+      // any in-progress fade animations.
+      if (streamBody) {
+        const caret = streamBody.querySelector('.caret');
+        if (caret) caret.remove();
+      }
 
       // save the message — store both the clean text and any proposals so they persist
       const msgRecord = { role: 'ekko', content: cleanText };
@@ -2926,7 +3020,17 @@ async function sendMessage() {
       if (bufferedText.length > 0) {
         const { cleanText, proposals } = parseMemoryProposals(bufferedText);
         if (streamBody) {
-          streamBody.innerHTML = formatEkko(cleanText) + '<span style="color: var(--ink-dimmer); font-size: 11px; font-style: italic;"> — stopped</span>';
+          // remove caret and append the stopped indicator to the last
+          // rendered paragraph, preserving the paragraph structure.
+          const caret = streamBody.querySelector('.caret');
+          if (caret) caret.remove();
+          const lastPara = streamBody.querySelector('.ekko-para:last-child');
+          if (lastPara) {
+            const stoppedMark = document.createElement('span');
+            stoppedMark.style.cssText = 'color: var(--ink-dimmer); font-size: 11px; font-style: italic;';
+            stoppedMark.textContent = ' — stopped';
+            lastPara.appendChild(stoppedMark);
+          }
         }
         const msgRecord = { role: 'ekko', content: cleanText };
         if (proposals.length > 0) msgRecord.proposals = proposals;
