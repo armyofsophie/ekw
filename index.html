@@ -1259,7 +1259,6 @@
           <optgroup label="openai">
             <option value="openai/gpt-5.4">gpt-5.4 — vision</option>
             <option value="openai/gpt-4o-2024-11-20">gpt-4o (nov 2024) — vision</option>
-            <option value="openai/gpt-4o">gpt-4o latest — vision</option>
           </optgroup>
           <optgroup label="anthropic">
             <option value="anthropic/claude-opus-4.6">claude opus 4.6 — vision</option>
@@ -1706,7 +1705,7 @@ function render() {
     else if (m.role === 'ekko') attachEkkoActions(el, i);
     chatEl.appendChild(el);
   });
-  scrollToBottom(true);
+  // render() does not scroll. callers add scrollToBottom() if they want it.
 }
 
 function attachUserActions(el, idx) {
@@ -1842,26 +1841,14 @@ function formatEkko(text) {
   return escaped;
 }
 
-function scrollToBottom(force) {
+function scrollToBottom() {
+  // unconditional scroll to bottom. only called from explicit user actions
+  // (send message, jump-to-bottom button). painter never calls this.
   requestAnimationFrame(() => {
     const main = $('main');
-    // only auto-scroll if the user hasn't taken control by scrolling up,
-    // unless caller explicitly forces (user send, jump button, etc)
-    if (!force && userHasScrolled) return;
     main.scrollTop = main.scrollHeight;
-    userHasScrolled = false;
   });
 }
-
-// track whether the user has scrolled up during a stream; if they have,
-// we stop auto-scrolling until either a new user message arrives or they
-// tap jump-to-bottom.
-let userHasScrolled = false;
-
-// track whether the user has an active touch on the chat scroll area.
-// this is the earliest signal we have that they're trying to take control —
-// touch events fire before scroll events do.
-let userIsTouching = false;
 
 // jump-to-bottom button visibility
 function updateJumpBottomVisibility() {
@@ -1884,10 +1871,10 @@ function appendMsg(role, content, attachments) {
   if (emptyEl.parentNode) emptyEl.remove();
   const el = renderMsg(msg);
   chatEl.appendChild(el);
-  // forcing here is correct: when the user sends a message OR when ekko
-  // appends a system message, we want to snap to bottom. resets
-  // userHasScrolled so that a fresh stream starts with auto-scroll enabled.
-  scrollToBottom(true);
+  // note: appendMsg no longer auto-scrolls. the only paths that should
+  // scroll-to-bottom are explicit user actions (sending a message, tapping
+  // jump-to-bottom). callers that need a scroll (e.g. the user-send flow)
+  // call scrollToBottom() themselves immediately after appendMsg.
   return el;
 }
 
@@ -1897,7 +1884,9 @@ function showTyping() {
   el.id = 'typing';
   el.innerHTML = '<div class="body"><div class="typing"><span></span><span></span><span></span></div></div>';
   chatEl.appendChild(el);
-  scrollToBottom(true);
+  // no scroll — if the user scrolled up to read earlier context while waiting
+  // for ekko to reply, the typing indicator appearing should not yank them
+  // back down. they decide when to follow.
 }
 function removeTyping() {
   const el = $('typing');
@@ -2697,6 +2686,10 @@ async function sendMessage() {
   // re-render so action buttons attach to the new last user message
   // and the previous one's buttons get removed
   render();
+  // scroll to bottom — this is the one place in the painter flow where
+  // we do auto-scroll, because the user just sent a message and wants to
+  // see their own message land at the bottom.
+  scrollToBottom();
 
   isStreaming = true;
   statusDot.classList.remove('idle');
@@ -2818,17 +2811,9 @@ async function sendMessage() {
       paintedLength++;
       paintFrame();
 
-      // respect user scroll: if they've scrolled up during this stream, don't
-      // yank them back. checking distance directly (not just the flag) catches
-      // the case where a scroll event hasn't fired yet but the user is clearly
-      // reading something further up. also bail out if there's an active touch
-      // — touch events fire before scroll events, so this is the earliest signal
-      // that the user is trying to take control.
-      const main = $('main');
-      const distanceFromBottom = main.scrollHeight - main.scrollTop - main.clientHeight;
-      if (!userHasScrolled && !userIsTouching && distanceFromBottom < 200) {
-        main.scrollTop = main.scrollHeight;
-      }
+      // painter no longer touches scroll position. user decides where the
+      // viewport sits — if they want to follow the painter, they scroll
+      // down manually or tap jump-to-bottom. this is deliberate.
 
       // delay
       const baseDelay = state.typingSpeed || 0;
@@ -2925,7 +2910,7 @@ async function sendMessage() {
         for (const p of proposals) {
           renderPendingMemoryCard(p, streamEl);
         }
-        scrollToBottom();
+        // no scroll — user decides when to follow.
       }
     }
 
@@ -2949,7 +2934,7 @@ async function sendMessage() {
         saveMessages();
         if (proposals.length > 0 && streamEl) {
           for (const p of proposals) renderPendingMemoryCard(p, streamEl);
-          scrollToBottom();
+          // no scroll — user decides when to follow.
         }
       } else if (streamEl) {
         streamEl.remove();
@@ -3134,38 +3119,19 @@ $('model').addEventListener('change', e => {
   $('customModelField').style.display = e.target.value === '__custom__' ? 'flex' : 'none';
 });
 
-// ===== jump to bottom + user scroll tracking =====
-// the bottom threshold is generous (200px) so that small/incidental scrolls
-// while reading near the bottom don't accidentally wrest control from the
-// painter. the user has to scroll up a meaningful amount to count as "taking
-// control" — but once they have, they keep it until they explicitly return.
+// ===== jump to bottom button =====
+// the only auto-scroll triggers in this app are:
+//   1. user sends a new message (scrollToBottom called from appendMsg/send)
+//   2. user taps the jump-to-bottom button
+// everything else — painter running, painter finishing, new ekko message
+// arriving — leaves the viewport exactly where the user put it.
+// this listener only exists to manage the visibility of the jump button.
 $('main').addEventListener('scroll', () => {
   updateJumpBottomVisibility();
-  const main = $('main');
-  const distanceFromBottom = main.scrollHeight - main.scrollTop - main.clientHeight;
-  if (distanceFromBottom > 200) {
-    // user is reading something further up — stop auto-scrolling
-    userHasScrolled = true;
-  } else if (distanceFromBottom < 20) {
-    // user has explicitly returned to the bottom edge — resume auto-scroll
-    userHasScrolled = false;
-  }
-  // in the 20–200px middle zone we leave userHasScrolled unchanged. that
-  // way passive height growth from the painter doesn't accidentally toggle
-  // the flag back to false while the user is mid-read.
 }, { passive: true });
 
-// touch tracking: if the user has a finger on the screen, the painter should
-// not auto-scroll. this catches the gap between finger-down and the first
-// scroll event firing, which on touch devices can be 100ms+ — long enough
-// for several painter characters to land and re-snap to bottom before the
-// scroll event tells us the user took control. (declared at top of script.)
-$('main').addEventListener('touchstart', () => { userIsTouching = true; }, { passive: true });
-$('main').addEventListener('touchend',   () => { userIsTouching = false; }, { passive: true });
-$('main').addEventListener('touchcancel',() => { userIsTouching = false; }, { passive: true });
-
 $('jumpBottom').addEventListener('click', () => {
-  scrollToBottom(true);
+  scrollToBottom();
 });
 
 // ===== tab visibility — proactive freshness check =====
@@ -3776,6 +3742,7 @@ async function loadFromCloud() {
     setCloudStatus('connected');
     hydrate();
     render();
+    scrollToBottom();
     renderMemList();
     syncHeaderSwitcherValue();
 
@@ -3838,6 +3805,7 @@ $('signOutBtn').addEventListener('click', handleSignOut);
 // ============================================================
 hydrate();
 render();
+scrollToBottom();
 renderMemList();
 autoResize();
 setCloudStatus('offline');
