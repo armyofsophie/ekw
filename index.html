@@ -1867,74 +1867,12 @@ function scrollToBottom() {
 // the user sends a new message, so their message lands at top and ekko's
 // reply paints into the empty space below. matches chatgpt's ui pattern.
 // if there isn't enough content below the message to push it to the top,
-// the browser will clamp at scrollHeight — that's fine, falls back to
-// "scroll as far as possible."
-// spacer element that temporarily fills the viewport below the user's sent
-// message so it can scroll to the top. without this, the browser can't scroll
-// the last element to the top because there's no content below it.
-let scrollSpacer = null;
-
-function scrollMessageToTop(el) {
-  if (!el) return;
-
-  // clean up any previous spacer
-  removeSpacer();
-
-  // insert a spacer at the end of the chat — tall enough to push el
-  // to the top of the viewport.
-  scrollSpacer = document.createElement('div');
-  scrollSpacer.id = 'scrollSpacer';
-  scrollSpacer.style.cssText = 'flex-shrink: 0; pointer-events: none;';
-  chatEl.appendChild(scrollSpacer);
-
-  // wait for viewport to stabilise (mobile keyboard dismissal). poll
-  // until innerHeight stops changing for 3 consecutive checks.
-  let lastH = window.innerHeight;
-  let stable = 0;
-  const poll = () => {
-    const h = window.innerHeight;
-    if (h === lastH) stable++; else { stable = 0; lastH = h; }
-    if (stable < 3) { setTimeout(poll, 60); return; }
-
-    requestAnimationFrame(() => {
-      const main = $('main');
-      // size spacer to fill the viewport below the message
-      scrollSpacer.style.height = Math.max(0, main.clientHeight - 80) + 'px';
-      // scroll the element to the top
-      const mainRect = main.getBoundingClientRect();
-      const elRect = el.getBoundingClientRect();
-      main.scrollTop += (elRect.top - mainRect.top - 16);
-    });
-  };
-  poll();
-}
-
-function removeSpacer() {
-  if (!scrollSpacer || !scrollSpacer.parentNode) {
-    scrollSpacer = null;
-    return;
-  }
-  // removing the spacer reduces scrollHeight. if the spacer is below the
-  // current viewport (which it should be — it's at the bottom of the chat),
-  // removing it won't affect scrollTop. but if the user has scrolled past
-  // the content into the spacer zone, we need to clamp scrollTop to the
-  // new maximum. save and restore to be safe.
-  const main = $('main');
-  const scrollBefore = main.scrollTop;
-  scrollSpacer.remove();
-  scrollSpacer = null;
-  // clamp: scrollTop can't exceed new scrollHeight - clientHeight
-  const maxScroll = main.scrollHeight - main.clientHeight;
-  main.scrollTop = Math.min(scrollBefore, maxScroll);
-}
-
-// spacer stays at full height during painting — it's off-screen below
-// ekko's growing reply so the user never sees it. removed in the finally
-// block when streaming ends. no incremental shrinking needed.
-function shrinkSpacer() {
-  // intentional no-op. the spacer is removed by removeSpacer() in the
-  // stream-complete handler, not shrunk during painting.
-}
+// auto-follow: during streaming, the painter keeps the latest text in view
+// by scrolling to bottom on each character. the moment the user scrolls up
+// (or touches the screen on mobile), auto-follow unlocks and stays off
+// until the next explicit user action (sending a message or tapping
+// jump-to-bottom). no spacers, no viewport manipulation, no complexity.
+let autoFollow = true;
 
 // jump-to-bottom button visibility
 function updateJumpBottomVisibility() {
@@ -2769,20 +2707,15 @@ async function sendMessage() {
   inputEl.value = '';
   autoResize();
   clearAttachedFiles();
-  // blur the input so the mobile keyboard dismisses. this lets the viewport
-  // settle at its full height before the delayed scroll runs.
-  inputEl.blur();
   // store the user's typed text and attachments separately on the message record
   appendMsg('user', text, attachmentsForMessage);
   // re-render so action buttons attach to the new last user message
   // and the previous one's buttons get removed
   render();
-  // scroll the newly-sent user message to the top of the viewport so that
-  // ekko's reply will paint in below it. this hides ekko's previous reply
-  // above the fold until the user scrolls back up — matches chatgpt's
-  // "reply focuses on the current turn" behaviour.
-  const userMsgEls = chatEl.querySelectorAll('.msg.user');
-  scrollMessageToTop(userMsgEls[userMsgEls.length - 1]);
+  // scroll to bottom so the user sees their sent message, and enable
+  // auto-follow so the painter keeps the latest text in view as it paints.
+  scrollToBottom();
+  autoFollow = true;
 
   isStreaming = true;
   statusDot.classList.remove('idle');
@@ -2951,13 +2884,13 @@ async function sendMessage() {
       paintedLength++;
       paintFrame();
 
-      // shrink the scroll spacer as ekko's reply grows, so there's no void
-      // below the reply. once the spacer hits 0 it removes itself.
-      shrinkSpacer();
-
-      // painter no longer touches scroll position. user decides where the
-      // viewport sits — if they want to follow the painter, they scroll
-      // down manually or tap jump-to-bottom. this is deliberate.
+      // auto-follow: keep the latest text in view while painting, but only
+      // if the user hasn't scrolled up to take control. once they scroll up,
+      // autoFollow stays false until the next send or jump-to-bottom.
+      if (autoFollow) {
+        const main = $('main');
+        main.scrollTop = main.scrollHeight;
+      }
 
       // delay
       const baseDelay = state.typingSpeed || 0;
@@ -3100,7 +3033,6 @@ async function sendMessage() {
     }
   } finally {
     isStreaming = false;
-    removeSpacer(); // clean up the scroll spacer if it's still around
     statusDot.classList.add('idle');
     sendBtn.classList.remove('streaming');
     sendBtn.setAttribute('aria-label', 'send');
@@ -3108,10 +3040,8 @@ async function sendMessage() {
     currentAbortController = null;
     currentAbortFn = null;
 
-    // preserve the user's scroll position across the re-render. without
-    // this, render() rebuilds the DOM and the browser resets scroll to
-    // wherever the new layout naturally settles (usually the bottom),
-    // yanking the user away from where they were reading.
+    // preserve scroll position across re-render so we don't yank
+    // the user away from wherever they're reading.
     const main = $('main');
     const savedScroll = main.scrollTop;
     render();
@@ -3119,9 +3049,8 @@ async function sendMessage() {
       main.scrollTop = savedScroll;
     });
 
-    // on desktop, refocus the input so the user can type immediately.
-    // on mobile (touch device), don't — refocusing would bring the
-    // keyboard back up, resize the viewport, and disrupt scroll position.
+    // refocus input on desktop so user can type immediately.
+    // skip on touch devices to avoid keyboard popping back up.
     const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
     if (!isTouchDevice) {
       inputEl.focus();
@@ -3287,18 +3216,31 @@ $('model').addEventListener('change', e => {
   $('customModelField').style.display = e.target.value === '__custom__' ? 'flex' : 'none';
 });
 
-// ===== jump to bottom button =====
-// the only auto-scroll triggers in this app are:
-//   1. user sends a new message (scrollToBottom called from appendMsg/send)
-//   2. user taps the jump-to-bottom button
-// everything else — painter running, painter finishing, new ekko message
-// arriving — leaves the viewport exactly where the user put it.
-// this listener only exists to manage the visibility of the jump button.
+// ===== scroll tracking + auto-follow =====
+// autoFollow starts true on each send. the painter scrolls to bottom on each
+// character while autoFollow is true. the moment the user scrolls up (or
+// touches the screen on mobile), autoFollow turns false and stays false until
+// the next send or jump-to-bottom tap. simple, predictable, no surprises.
 $('main').addEventListener('scroll', () => {
   updateJumpBottomVisibility();
+  if (!autoFollow) return; // already unlocked, nothing to check
+  const main = $('main');
+  const distanceFromBottom = main.scrollHeight - main.scrollTop - main.clientHeight;
+  // if user is more than 150px from the bottom, they've scrolled up — unlock
+  if (distanceFromBottom > 150) {
+    autoFollow = false;
+  }
+}, { passive: true });
+
+// on mobile, touch fires before scroll — catch the instant they put a finger
+// on the screen and unlock immediately so the next painter character doesn't
+// yank them back before the scroll event has a chance to fire.
+$('main').addEventListener('touchstart', () => {
+  autoFollow = false;
 }, { passive: true });
 
 $('jumpBottom').addEventListener('click', () => {
+  autoFollow = true;
   scrollToBottom();
 });
 
