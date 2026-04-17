@@ -195,14 +195,12 @@
   }
 
   /* each character painted during streaming becomes a <span class="ekko-char">
-     that fades in over 400ms when first added to the dom. the typewriter
+     that fades in over 650ms when first added to the dom. the typewriter
      delay between characters (40ms default) is much shorter than the fade
-     duration, so multiple characters are always mid-fade at the same time —
-     producing a smooth "wave of reveal" as content arrives. matches
-     chatgpt's streaming feel. no transform because at character level it
-     reads as jitter; just opacity. */
+     duration, so many characters are always mid-fade at the same time —
+     producing a smooth, dreamy "wave of reveal" as content arrives. */
   .msg.ekko .body .ekko-char {
-    animation: fadeInChar 400ms ease-out both;
+    animation: fadeInChar 650ms ease-out both;
   }
   @keyframes fadeInChar {
     from { opacity: 0; }
@@ -1875,11 +1873,16 @@ function scrollMessageToTop(el) {
   if (!el) return;
   requestAnimationFrame(() => {
     const main = $('main');
-    // offset accounts for the 24px top padding of .chat plus a small gap
-    // so the message isn't flush against the very top edge.
-    const offset = 16;
-    const target = el.offsetTop - offset;
-    main.scrollTop = target;
+    // use getBoundingClientRect for reliable positioning regardless of
+    // DOM nesting / offsetParent chain. we want the element's top to sit
+    // near the top of the scroll container, with a small gap.
+    const mainRect = main.getBoundingClientRect();
+    const elRect = el.getBoundingClientRect();
+    const gap = 16;
+    // how far we need to scroll from current position so el.top lands at
+    // main.top + gap:
+    const scrollBy = elRect.top - mainRect.top - gap;
+    main.scrollTop += scrollBy;
   });
 }
 
