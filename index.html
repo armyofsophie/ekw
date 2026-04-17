@@ -1871,19 +1871,21 @@ function scrollToBottom() {
 // "scroll as far as possible."
 function scrollMessageToTop(el) {
   if (!el) return;
-  requestAnimationFrame(() => {
-    const main = $('main');
-    // use getBoundingClientRect for reliable positioning regardless of
-    // DOM nesting / offsetParent chain. we want the element's top to sit
-    // near the top of the scroll container, with a small gap.
-    const mainRect = main.getBoundingClientRect();
-    const elRect = el.getBoundingClientRect();
-    const gap = 16;
-    // how far we need to scroll from current position so el.top lands at
-    // main.top + gap:
-    const scrollBy = elRect.top - mainRect.top - gap;
-    main.scrollTop += scrollBy;
-  });
+  // on mobile, the keyboard dismisses when the input clears on send.
+  // this causes the viewport to resize over ~300ms, which invalidates
+  // any scroll calculation made in the same frame. we delay the scroll
+  // until the viewport has settled. on desktop this delay is invisible
+  // because no keyboard dismissal happens.
+  setTimeout(() => {
+    requestAnimationFrame(() => {
+      const main = $('main');
+      const mainRect = main.getBoundingClientRect();
+      const elRect = el.getBoundingClientRect();
+      const gap = 16;
+      const scrollBy = elRect.top - mainRect.top - gap;
+      main.scrollTop += scrollBy;
+    });
+  }, 350);
 }
 
 // jump-to-bottom button visibility
@@ -2719,6 +2721,9 @@ async function sendMessage() {
   inputEl.value = '';
   autoResize();
   clearAttachedFiles();
+  // blur the input so the mobile keyboard dismisses. this lets the viewport
+  // settle at its full height before the delayed scroll runs.
+  inputEl.blur();
   // store the user's typed text and attachments separately on the message record
   appendMsg('user', text, attachmentsForMessage);
   // re-render so action buttons attach to the new last user message
