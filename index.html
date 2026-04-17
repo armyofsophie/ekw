@@ -114,7 +114,7 @@
   .chat {
     max-width: 720px;
     margin: 0 auto;
-    padding: 24px 20px 80vh;
+    padding: 24px 20px 32px;
     display: flex;
     flex-direction: column;
     gap: 28px;
@@ -1869,18 +1869,61 @@ function scrollToBottom() {
 // if there isn't enough content below the message to push it to the top,
 // the browser will clamp at scrollHeight — that's fine, falls back to
 // "scroll as far as possible."
+// spacer element that temporarily fills the viewport below the user's sent
+// message so it can scroll to the top. without this, the browser can't scroll
+// the last element to the top because there's no content below it.
+let scrollSpacer = null;
+
 function scrollMessageToTop(el) {
   if (!el) return;
-  setTimeout(() => {
+
+  // clean up any previous spacer
+  removeSpacer();
+
+  // insert a spacer at the end of the chat — tall enough to push el
+  // to the top of the viewport.
+  scrollSpacer = document.createElement('div');
+  scrollSpacer.id = 'scrollSpacer';
+  scrollSpacer.style.cssText = 'flex-shrink: 0; pointer-events: none;';
+  chatEl.appendChild(scrollSpacer);
+
+  // wait for viewport to stabilise (mobile keyboard dismissal). poll
+  // until innerHeight stops changing for 3 consecutive checks.
+  let lastH = window.innerHeight;
+  let stable = 0;
+  const poll = () => {
+    const h = window.innerHeight;
+    if (h === lastH) stable++; else { stable = 0; lastH = h; }
+    if (stable < 3) { setTimeout(poll, 60); return; }
+
     requestAnimationFrame(() => {
       const main = $('main');
+      // size spacer to fill the viewport below the message
+      scrollSpacer.style.height = Math.max(0, main.clientHeight - 80) + 'px';
+      // scroll the element to the top
       const mainRect = main.getBoundingClientRect();
       const elRect = el.getBoundingClientRect();
-      const gap = 16;
-      const scrollBy = elRect.top - mainRect.top - gap;
-      main.scrollTop += scrollBy;
+      main.scrollTop += (elRect.top - mainRect.top - 16);
     });
-  }, 350);
+  };
+  poll();
+}
+
+function removeSpacer() {
+  if (scrollSpacer && scrollSpacer.parentNode) scrollSpacer.remove();
+  scrollSpacer = null;
+}
+
+// shrink the spacer progressively as ekko's reply grows, so there's no
+// void below the reply. called from the painter on each character.
+function shrinkSpacer() {
+  if (!scrollSpacer) return;
+  const h = parseFloat(scrollSpacer.style.height) || 0;
+  if (h <= 0) { removeSpacer(); return; }
+  // shrink by 30px per call — fast enough to stay ahead of content growth,
+  // slow enough to not jerk the viewport.
+  scrollSpacer.style.height = Math.max(0, h - 30) + 'px';
+  if (h - 30 <= 0) removeSpacer();
 }
 
 // jump-to-bottom button visibility
@@ -2898,6 +2941,10 @@ async function sendMessage() {
       paintedLength++;
       paintFrame();
 
+      // shrink the scroll spacer as ekko's reply grows, so there's no void
+      // below the reply. once the spacer hits 0 it removes itself.
+      shrinkSpacer();
+
       // painter no longer touches scroll position. user decides where the
       // viewport sits — if they want to follow the painter, they scroll
       // down manually or tap jump-to-bottom. this is deliberate.
@@ -3043,6 +3090,7 @@ async function sendMessage() {
     }
   } finally {
     isStreaming = false;
+    removeSpacer(); // clean up the scroll spacer if it's still around
     statusDot.classList.add('idle');
     sendBtn.classList.remove('streaming');
     sendBtn.setAttribute('aria-label', 'send');
