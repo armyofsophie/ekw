@@ -114,7 +114,7 @@
   .chat {
     max-width: 720px;
     margin: 0 auto;
-    padding: 24px 20px 32px;
+    padding: 24px 20px 80vh;
     display: flex;
     flex-direction: column;
     gap: 28px;
@@ -1871,10 +1871,6 @@ function scrollToBottom() {
 // "scroll as far as possible."
 function scrollMessageToTop(el) {
   if (!el) return;
-  // debug: flash the target element red so we can see if the right one is found
-  el.style.outline = '3px solid red';
-  setTimeout(() => { el.style.outline = ''; }, 2000);
-
   setTimeout(() => {
     requestAnimationFrame(() => {
       const main = $('main');
@@ -1882,15 +1878,6 @@ function scrollMessageToTop(el) {
       const elRect = el.getBoundingClientRect();
       const gap = 16;
       const scrollBy = elRect.top - mainRect.top - gap;
-      // debug: log what we're calculating
-      console.log('scrollMessageToTop:', {
-        mainTop: mainRect.top,
-        elTop: elRect.top,
-        scrollBy,
-        currentScroll: main.scrollTop,
-        scrollHeight: main.scrollHeight,
-        clientHeight: main.clientHeight,
-      });
       main.scrollTop += scrollBy;
     });
   }, 350);
