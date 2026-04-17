@@ -3097,9 +3097,25 @@ async function sendMessage() {
     sendBtn.disabled = inputEl.value.trim().length === 0;
     currentAbortController = null;
     currentAbortFn = null;
-    inputEl.focus();
-    // re-render to attach action buttons to the new last messages
+
+    // preserve the user's scroll position across the re-render. without
+    // this, render() rebuilds the DOM and the browser resets scroll to
+    // wherever the new layout naturally settles (usually the bottom),
+    // yanking the user away from where they were reading.
+    const main = $('main');
+    const savedScroll = main.scrollTop;
     render();
+    requestAnimationFrame(() => {
+      main.scrollTop = savedScroll;
+    });
+
+    // on desktop, refocus the input so the user can type immediately.
+    // on mobile (touch device), don't — refocusing would bring the
+    // keyboard back up, resize the viewport, and disrupt scroll position.
+    const isTouchDevice = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+    if (!isTouchDevice) {
+      inputEl.focus();
+    }
   }
 }
 
