@@ -1871,11 +1871,10 @@ function scrollToBottom() {
 // "scroll as far as possible."
 function scrollMessageToTop(el) {
   if (!el) return;
-  // on mobile, the keyboard dismisses when the input clears on send.
-  // this causes the viewport to resize over ~300ms, which invalidates
-  // any scroll calculation made in the same frame. we delay the scroll
-  // until the viewport has settled. on desktop this delay is invisible
-  // because no keyboard dismissal happens.
+  // debug: flash the target element red so we can see if the right one is found
+  el.style.outline = '3px solid red';
+  setTimeout(() => { el.style.outline = ''; }, 2000);
+
   setTimeout(() => {
     requestAnimationFrame(() => {
       const main = $('main');
@@ -1883,6 +1882,15 @@ function scrollMessageToTop(el) {
       const elRect = el.getBoundingClientRect();
       const gap = 16;
       const scrollBy = elRect.top - mainRect.top - gap;
+      // debug: log what we're calculating
+      console.log('scrollMessageToTop:', {
+        mainTop: mainRect.top,
+        elTop: elRect.top,
+        scrollBy,
+        currentScroll: main.scrollTop,
+        scrollHeight: main.scrollHeight,
+        clientHeight: main.clientHeight,
+      });
       main.scrollTop += scrollBy;
     });
   }, 350);
