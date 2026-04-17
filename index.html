@@ -1910,20 +1910,30 @@ function scrollMessageToTop(el) {
 }
 
 function removeSpacer() {
-  if (scrollSpacer && scrollSpacer.parentNode) scrollSpacer.remove();
+  if (!scrollSpacer || !scrollSpacer.parentNode) {
+    scrollSpacer = null;
+    return;
+  }
+  // removing the spacer reduces scrollHeight. if the spacer is below the
+  // current viewport (which it should be — it's at the bottom of the chat),
+  // removing it won't affect scrollTop. but if the user has scrolled past
+  // the content into the spacer zone, we need to clamp scrollTop to the
+  // new maximum. save and restore to be safe.
+  const main = $('main');
+  const scrollBefore = main.scrollTop;
+  scrollSpacer.remove();
   scrollSpacer = null;
+  // clamp: scrollTop can't exceed new scrollHeight - clientHeight
+  const maxScroll = main.scrollHeight - main.clientHeight;
+  main.scrollTop = Math.min(scrollBefore, maxScroll);
 }
 
-// shrink the spacer progressively as ekko's reply grows, so there's no
-// void below the reply. called from the painter on each character.
+// spacer stays at full height during painting — it's off-screen below
+// ekko's growing reply so the user never sees it. removed in the finally
+// block when streaming ends. no incremental shrinking needed.
 function shrinkSpacer() {
-  if (!scrollSpacer) return;
-  const h = parseFloat(scrollSpacer.style.height) || 0;
-  if (h <= 0) { removeSpacer(); return; }
-  // shrink by 30px per call — fast enough to stay ahead of content growth,
-  // slow enough to not jerk the viewport.
-  scrollSpacer.style.height = Math.max(0, h - 30) + 'px';
-  if (h - 30 <= 0) removeSpacer();
+  // intentional no-op. the spacer is removed by removeSpacer() in the
+  // stream-complete handler, not shrunk during painting.
 }
 
 // jump-to-bottom button visibility
