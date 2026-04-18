@@ -4322,7 +4322,6 @@ async function loadFromCloud() {
     if (cloudEmpty && localHasData) {
       showMigrateBanner({ messages: messages.length, memories: memories.length });
     }
-    }
   } catch (err) {
     console.error('cloud load failed', err);
     setCloudStatus('error');
