@@ -53,8 +53,8 @@
   body {
     display: flex;
     flex-direction: column;
-    padding-top: var(--safe-top);
-    padding-bottom: var(--safe-bottom);
+    /* safe-top is handled by the header's extended background, not body padding.
+       this ensures the header visually covers the status bar zone. */
   }
 
   /* ===== HEADER ===== */
@@ -63,16 +63,18 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 14px 20px 12px;
+    padding: calc(12px + var(--safe-top)) 16px 12px;
     border-bottom: 1px solid var(--line-soft);
     background: var(--bg);
     z-index: 10;
+    gap: 8px;
   }
   .title {
     font-weight: 500;
     font-size: 17px;
     letter-spacing: -0.01em;
     color: var(--ink);
+    white-space: nowrap;
   }
   .title-dot {
     display: inline-block;
@@ -92,11 +94,12 @@
     color: var(--ink-dim);
     cursor: pointer;
     padding: 8px;
-    margin: -8px;
     display: flex;
     align-items: center;
     justify-content: center;
     transition: color 0.2s;
+    min-width: 36px;
+    min-height: 36px;
   }
   .icon-btn:hover, .icon-btn:active { color: var(--ink); }
   .icon-btn svg { width: 20px; height: 20px; stroke: currentColor; fill: none; stroke-width: 1.5; }
@@ -288,7 +291,7 @@
   .composer {
     flex-shrink: 0;
     background: var(--bg);
-    padding: 10px 14px 14px;
+    padding: 8px 14px calc(6px + var(--safe-bottom));
   }
   .composer-inner {
     max-width: 720px;
@@ -528,7 +531,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 12px 20px;
+    padding: 14px 16px 14px 20px;
     cursor: pointer;
     border-left: 3px solid transparent;
     transition: background 0.12s;
@@ -558,9 +561,9 @@
   }
   .convo-item-actions {
     display: flex;
-    gap: 4px;
+    gap: 12px;
     flex-shrink: 0;
-    margin-left: 8px;
+    margin-left: 12px;
     opacity: 0;
     transition: opacity 0.15s;
   }
@@ -571,10 +574,12 @@
   }
   .convo-action-btn {
     background: none; border: none; color: var(--ink-dim); cursor: pointer;
-    padding: 4px; border-radius: 4px; display: flex;
+    padding: 8px; border-radius: 6px; display: flex;
+    min-width: 36px; min-height: 36px;
+    align-items: center; justify-content: center;
   }
   .convo-action-btn:hover { color: var(--ink); background: rgba(255,255,255,0.06); }
-  .convo-action-btn svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .convo-action-btn svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 
   /* ===== SETTINGS DRAWER (right side) ===== */
   .drawer {
