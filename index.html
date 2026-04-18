@@ -76,6 +76,49 @@
     color: var(--ink);
     white-space: nowrap;
   }
+  .title-wrap {
+    position: relative;
+  }
+  .title-btn {
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 4px 0;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1px;
+  }
+  .title-model {
+    font-size: 11px;
+    color: var(--ink-dimmer);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 160px;
+  }
+  .model-popover {
+    display: none;
+    position: absolute;
+    top: 100%;
+    left: 0;
+    z-index: 20;
+    margin-top: 4px;
+    background: var(--bg-elev);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 6px;
+    min-width: 200px;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+  }
+  .model-popover.open { display: block; }
+  .model-popover .model-switcher {
+    width: 100%;
+    max-width: none;
+    font-size: 13px;
+    padding: 8px 10px;
+    border-radius: 8px;
+  }
   .title-dot {
     display: inline-block;
     width: 6px;
@@ -559,27 +602,56 @@
     font-size: 11px;
     color: var(--ink-dimmer);
   }
-  .convo-item-actions {
-    display: flex;
-    gap: 12px;
+  .convo-kebab-wrap {
+    position: relative;
     flex-shrink: 0;
-    margin-left: 12px;
-    opacity: 0;
-    transition: opacity 0.15s;
+    margin-left: 8px;
   }
-  .convo-item:hover .convo-item-actions { opacity: 1; }
-  /* on mobile, always show actions since there's no hover */
-  @media (hover: none) {
-    .convo-item-actions { opacity: 0.6; }
+  .convo-kebab-btn {
+    background: none;
+    border: none;
+    color: var(--ink-dim);
+    font-size: 20px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 8px 4px;
+    border-radius: 6px;
+    min-width: 32px;
+    min-height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
   }
-  .convo-action-btn {
-    background: none; border: none; color: var(--ink-dim); cursor: pointer;
-    padding: 8px; border-radius: 6px; display: flex;
-    min-width: 36px; min-height: 36px;
-    align-items: center; justify-content: center;
+  .convo-kebab-btn:hover { color: var(--ink); background: rgba(255,255,255,0.06); }
+  .convo-kebab-menu {
+    display: none;
+    position: absolute;
+    right: 0;
+    top: 100%;
+    z-index: 10;
+    background: var(--bg-elev-2);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 4px 0;
+    min-width: 120px;
+    box-shadow: 0 6px 20px rgba(0,0,0,0.4);
   }
-  .convo-action-btn:hover { color: var(--ink); background: rgba(255,255,255,0.06); }
-  .convo-action-btn svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .convo-kebab-menu.open { display: block; }
+  .convo-menu-item {
+    display: block;
+    width: 100%;
+    background: none;
+    border: none;
+    color: var(--ink);
+    font-family: inherit;
+    font-size: 14px;
+    padding: 10px 16px;
+    text-align: left;
+    cursor: pointer;
+  }
+  .convo-menu-item:hover { background: rgba(255,255,255,0.06); }
+  .convo-menu-danger { color: var(--danger); }
+  .convo-menu-danger:hover { background: rgba(255,59,48,0.1); }
 
   /* ===== SETTINGS DRAWER (right side) ===== */
   .drawer {
@@ -1259,14 +1331,21 @@
 <body>
 
 <header>
-  <div style="display:flex; gap:10px; align-items:center;">
+  <div style="display:flex; gap:8px; align-items:center;">
     <button class="icon-btn" id="convoBtn" aria-label="conversations" title="conversations">
       <svg viewBox="0 0 24 24"><path d="M3 6h18M3 12h18M3 18h18"/></svg>
     </button>
-    <div class="title">ekko<span class="title-dot idle" id="statusDot"></span></div>
+    <div class="title-wrap">
+      <button class="title-btn" id="titleBtn">
+        <span class="title">ekko<span class="title-dot idle" id="statusDot"></span></span>
+        <span class="title-model" id="titleModelLabel"></span>
+      </button>
+      <div class="model-popover" id="modelPopover">
+        <select class="model-switcher" id="headerModelSwitcher" aria-label="model"></select>
+      </div>
+    </div>
   </div>
-  <div style="display:flex; gap:10px; align-items:center;">
-    <select class="model-switcher" id="headerModelSwitcher" aria-label="model"></select>
+  <div style="display:flex; gap:6px; align-items:center;">
     <button class="mem-indicator" id="memIndicator" aria-label="memories used">
       <span id="memIndicatorCount">0</span>
     </button>
@@ -1362,28 +1441,30 @@
       <div class="field">
         <label for="model">model</label>
         <select id="model">
-          <optgroup label="deepseek">
-            <option value="deepseek/deepseek-v3.2">deepseek v3.2 (text only)</option>
-            <option value="deepseek/deepseek-v3.2-speciale">deepseek v3.2 speciale (text only)</option>
-            <option value="deepseek/deepseek-v3.2-exp">deepseek v3.2 exp (text only)</option>
+          <optgroup label="xiaomi">
+            <option value="xiaomi/mimo-v2-pro">mimo v2 pro · text</option>
+            <option value="xiaomi/mimo-v2-omni">mimo v2 omni · vision</option>
           </optgroup>
-          <optgroup label="openai">
-            <option value="openai/gpt-5.4">gpt-5.4 — vision</option>
-            <option value="openai/gpt-4o-2024-11-20">gpt-4o (nov 2024) — vision</option>
+          <optgroup label="deepseek">
+            <option value="deepseek/deepseek-v3.2">deepseek v3.2 · text</option>
+            <option value="deepseek/deepseek-v3.2-speciale">deepseek v3.2 speciale · text</option>
           </optgroup>
           <optgroup label="anthropic">
-            <option value="anthropic/claude-opus-4.6">claude opus 4.6 — vision</option>
-            <option value="anthropic/claude-sonnet-4.6">claude sonnet 4.6 — vision</option>
+            <option value="anthropic/claude-opus-4.6">claude opus 4.6 · vision</option>
+            <option value="anthropic/claude-sonnet-4.6">claude sonnet 4.6 · vision</option>
           </optgroup>
           <optgroup label="google">
-            <option value="google/gemini-3.1-pro">gemini 3.1 pro — vision</option>
-            <option value="google/gemini-3.1-flash-lite">gemini 3.1 flash lite — vision</option>
+            <option value="google/gemini-3.1-pro">gemini 3.1 pro · vision</option>
+            <option value="google/gemini-3.1-flash-lite">gemini 3.1 flash lite · vision</option>
+          </optgroup>
+          <optgroup label="openai">
+            <option value="openai/gpt-5.4">gpt-5.4 · vision</option>
+            <option value="openai/gpt-4o-2024-11-20">gpt-4o nov 2024 · vision</option>
           </optgroup>
           <optgroup label="other">
-            <option value="xiaomi/mimo-v2-pro">mimo v2 pro — vision</option>
-            <option value="moonshotai/kimi-k2.5">kimi k2.5 — vision</option>
-            <option value="minimax/minimax-m2.5">minimax m2.5 (text only)</option>
-            <option value="x-ai/grok-4">grok 4</option>
+            <option value="x-ai/grok-4">grok 4 · vision</option>
+            <option value="moonshotai/kimi-k2.5">kimi k2.5 · vision</option>
+            <option value="minimax/minimax-m2.5">minimax m2.5 · text</option>
           </optgroup>
           <option value="__custom__">— custom model id —</option>
         </select>
@@ -3506,33 +3587,42 @@ function renderConvoList() {
     const el = document.createElement('div');
     el.className = 'convo-item' + (c.id === activeConvoId ? ' active' : '');
     const msgs = loadMessagesForConvo(c.id);
-    const lastMsg = msgs[msgs.length - 1];
-    const preview = lastMsg ? (lastMsg.content || '').slice(0, 50).replace(/\n/g, ' ') : 'empty';
     const timeAgo = c.updatedAt ? formatTimeAgo(c.updatedAt) : '';
     el.innerHTML = `
       <div class="convo-item-info">
         <div class="convo-item-title"></div>
         <div class="convo-item-meta">${msgs.length} msg${msgs.length !== 1 ? 's' : ''}${timeAgo ? ' · ' + timeAgo : ''}</div>
       </div>
-      <div class="convo-item-actions">
-        <button class="convo-action-btn rename-btn" title="rename">
-          <svg viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-        </button>
-        <button class="convo-action-btn delete-btn" title="delete">
-          <svg viewBox="0 0 24 24"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
-        </button>
+      <div class="convo-kebab-wrap">
+        <button class="convo-kebab-btn" title="options" aria-label="options">⋮</button>
+        <div class="convo-kebab-menu">
+          <button class="convo-menu-item rename-btn">rename</button>
+          <button class="convo-menu-item delete-btn convo-menu-danger">delete</button>
+        </div>
       </div>
     `;
     // set title text safely (not innerHTML)
     el.querySelector('.convo-item-title').textContent = c.title || 'new chat';
-    // click to switch
+    // click info area to switch
     el.querySelector('.convo-item-info').addEventListener('click', () => {
       switchConversation(c.id);
       closeConvoDrawer();
     });
+    // kebab toggle
+    const kebabBtn = el.querySelector('.convo-kebab-btn');
+    const kebabMenu = el.querySelector('.convo-kebab-menu');
+    kebabBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      // close any other open menus first
+      list.querySelectorAll('.convo-kebab-menu.open').forEach(m => {
+        if (m !== kebabMenu) m.classList.remove('open');
+      });
+      kebabMenu.classList.toggle('open');
+    });
     // rename
     el.querySelector('.rename-btn').addEventListener('click', (e) => {
       e.stopPropagation();
+      kebabMenu.classList.remove('open');
       const newTitle = prompt('rename chat:', c.title || 'new chat');
       if (newTitle && newTitle.trim()) {
         renameConversation(c.id, newTitle.trim());
@@ -3541,12 +3631,17 @@ function renderConvoList() {
     // delete
     el.querySelector('.delete-btn').addEventListener('click', (e) => {
       e.stopPropagation();
+      kebabMenu.classList.remove('open');
       if (!confirm('delete this chat? messages will be lost.')) return;
       deleteConversation(c.id);
       if (conversations.length === 0) closeConvoDrawer();
     });
     list.appendChild(el);
   }
+  // close kebab menus on click outside
+  list.addEventListener('click', () => {
+    list.querySelectorAll('.convo-kebab-menu.open').forEach(m => m.classList.remove('open'));
+  });
 }
 
 function formatTimeAgo(ts) {
@@ -3715,24 +3810,46 @@ function syncHeaderSwitcherValue() {
     header.insertBefore(o, header.firstChild);
     header.value = state.model;
   }
+  // update the small model label under the title
+  const label = $('titleModelLabel');
+  if (label) {
+    const selected = header.options[header.selectedIndex];
+    label.textContent = selected ? selected.textContent : state.model.split('/').pop();
+  }
 }
+
+// title button toggles the model popover
+$('titleBtn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  $('modelPopover').classList.toggle('open');
+});
+// close popover on outside click
+document.addEventListener('click', (e) => {
+  const popover = $('modelPopover');
+  if (popover.classList.contains('open') && !popover.contains(e.target) && e.target !== $('titleBtn')) {
+    popover.classList.remove('open');
+  }
+});
 
 $('headerModelSwitcher').addEventListener('change', e => {
   const val = e.target.value;
   if (val === '__custom__') {
     // can't enter a custom model id from the header dropdown — open settings instead
     syncHeaderSwitcherValue(); // reset selection
+    $('modelPopover').classList.remove('open');
     openDrawer();
     showToast('enter custom model id in settings');
     return;
   }
   state.model = val;
   saveState(); // triggers cloud sync
+  syncHeaderSwitcherValue(); // update the label
   // also update the drawer dropdown if it's visible, so they stay in sync
   if (Array.from($('model').options).some(o => o.value === val)) {
     $('model').value = val;
     $('customModelField').style.display = 'none';
   }
+  $('modelPopover').classList.remove('open');
   showToast('switched to ' + val.split('/').pop());
 });
 
