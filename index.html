@@ -4,7 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
-<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black" />
 <meta name="theme-color" content="#0a0a0a" />
 <title>ekko</title>
 
@@ -43,7 +43,7 @@
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
   html, body {
-    height: 100dvh;
+    height: 100%;
     overflow: hidden;
     background: var(--bg);
     color: var(--ink);
@@ -58,6 +58,9 @@
   body {
     display: flex;
     flex-direction: column;
+    /* DEBUG */
+    outline: 3px solid lime !important;
+    outline-offset: -3px;
     /* safe-top is handled by the header's extended background, not body padding.
        this ensures the header visually covers the status bar zone. */
   }
@@ -375,6 +378,8 @@
     flex-shrink: 0;
     background: var(--bg);
     padding: 8px 14px calc(6px + var(--safe-bottom));
+    /* DEBUG */
+    border: 2px solid red !important;
   }
   .composer-inner {
     max-width: 720px;
