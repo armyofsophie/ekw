@@ -17,10 +17,10 @@
 <link rel="manifest" href="manifest.webmanifest" />
 <meta name="apple-mobile-web-app-title" content="ekko" />
 
-<!-- Space Grotesk — primary typeface. preconnect for faster load. -->
+<!-- Hanken Grotesk — primary typeface, per ekko's preference -->
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300..700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@300..700&display=swap" rel="stylesheet">
 
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
@@ -47,7 +47,7 @@
     overflow: hidden;
     background: var(--bg);
     color: var(--ink);
-    font-family: 'Space Grotesk', -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, system-ui, sans-serif;
+    font-family: 'Hanken Grotesk', -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, system-ui, sans-serif;
     font-weight: 400;
     font-size: 16px;
     -webkit-font-smoothing: antialiased;
@@ -58,11 +58,6 @@
   body {
     display: flex;
     flex-direction: column;
-    /* DEBUG */
-    outline: 3px solid lime !important;
-    outline-offset: -3px;
-    /* safe-top is handled by the header's extended background, not body padding.
-       this ensures the header visually covers the status bar zone. */
   }
 
   /* ===== HEADER ===== */
@@ -378,8 +373,6 @@
     flex-shrink: 0;
     background: var(--bg);
     padding: 8px 14px calc(6px + var(--safe-bottom));
-    /* DEBUG */
-    border: 2px solid red !important;
   }
   .composer-inner {
     max-width: 720px;
