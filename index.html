@@ -1814,6 +1814,163 @@
 
 <script>
 // ============================================================
+// DIAGNOSE MODE — temporary
+// ============================================================
+// if the url has ?diagnose=1, replace the page with a read-only
+// diagnostic and stop the rest of the app from running. nothing
+// here writes to cloud or modifies state. used for debugging
+// auth/sync issues without risk.
+if (new URLSearchParams(window.location.search).get('diagnose') === '1') {
+  (async function runDiagnose() {
+    const SB_URL = 'https://bzfccjqtygjrtoojvhiv.supabase.co';
+    const SB_KEY = 'sb_publishable_h_Hs_A6X2n6HbjRnbjL_NQ_Fk3GprLD';
+    const TARGET_USER_ID = 'd7b1d6ea-4abd-4db5-9793-0cbcc3a02b66';
+
+    document.documentElement.innerHTML = `
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>ekko diagnose</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; background:#0a0a0a; color:#e0e0e0; margin:0; padding:20px; line-height:1.5; font-size:15px; }
+  h1 { font-size:18px; margin:0 0 16px; }
+  .box { background:#1a1a1a; border:1px solid #333; border-radius:8px; padding:14px; margin:10px 0; word-break:break-all; font-family:ui-monospace,monospace; font-size:13px; white-space:pre-wrap; }
+  .label { color:#888; font-size:11px; text-transform:uppercase; margin-bottom:4px; }
+  .ok { color:#4ade80; }
+  .bad { color:#ef4444; }
+  .warn { color:#fbbf24; }
+  .note { color:#888; font-size:12px; margin-top:16px; }
+</style>
+</head>
+<body>
+<h1>ekko diagnose</h1>
+<div class="note">read-only. nothing writes to cloud. screenshot below and send to claude. to exit, remove ?diagnose=1 from the url.</div>
+<div id="diagOutput">loading…</div>
+</body>
+`;
+
+    function row(label, value, klass = '') {
+      const v = value === null || value === undefined ? '(none)' : String(value);
+      const div = document.createElement('div');
+      div.className = 'box';
+      const labelEl = document.createElement('div');
+      labelEl.className = 'label';
+      labelEl.textContent = label;
+      const valueEl = document.createElement('div');
+      if (klass) valueEl.className = klass;
+      valueEl.textContent = v;
+      div.appendChild(labelEl);
+      div.appendChild(valueEl);
+      return div;
+    }
+
+    const out = document.getElementById('diagOutput');
+    out.innerHTML = '';
+
+    // wait for supabase library to be available
+    let waited = 0;
+    while (!window.supabase && waited < 5000) {
+      await new Promise(r => setTimeout(r, 100));
+      waited += 100;
+    }
+    if (!window.supabase) {
+      out.appendChild(row('supabase library', 'failed to load — network issue?', 'bad'));
+      return;
+    }
+
+    let sb;
+    try {
+      sb = window.supabase.createClient(SB_URL, SB_KEY, {
+        auth: { persistSession: true, autoRefreshToken: true, storageKey: 'ekko_supabase_auth' },
+      });
+      out.appendChild(row('supabase client', 'created ✓', 'ok'));
+    } catch (e) {
+      out.appendChild(row('supabase client', 'failed: ' + e.message, 'bad'));
+      return;
+    }
+
+    // session?
+    let session;
+    try {
+      const result = await sb.auth.getSession();
+      session = result?.data?.session;
+    } catch (e) {
+      out.appendChild(row('session check', 'threw: ' + e.message, 'bad'));
+      return;
+    }
+
+    if (!session) {
+      out.appendChild(row('session', 'NO SESSION — signed out on this device', 'bad'));
+      out.appendChild(row('user_id matches cloud data', 'cannot check', 'bad'));
+    } else {
+      out.appendChild(row('session', 'present ✓', 'ok'));
+      out.appendChild(row('email', session.user.email));
+      out.appendChild(row('user_id', session.user.id));
+      if (session.user.id === TARGET_USER_ID) {
+        out.appendChild(row('user_id matches cloud data', 'YES ✓', 'ok'));
+      } else {
+        out.appendChild(row('user_id matches cloud data', 'NO — different user. expected ' + TARGET_USER_ID, 'bad'));
+      }
+    }
+
+    // localStorage
+    let convoCount = 0, totalLocalMsgs = 0, activeConvoId = null;
+    try {
+      const convosRaw = localStorage.getItem('ekko_v1_conversations');
+      if (convosRaw) {
+        const convos = JSON.parse(convosRaw);
+        convoCount = Array.isArray(convos) ? convos.length : 0;
+        if (Array.isArray(convos)) {
+          for (const c of convos) {
+            const msgsRaw = localStorage.getItem('ekko_v1_chat_' + c.id);
+            if (msgsRaw) {
+              const msgs = JSON.parse(msgsRaw);
+              totalLocalMsgs += Array.isArray(msgs) ? msgs.length : 0;
+            }
+          }
+        }
+      }
+      activeConvoId = localStorage.getItem('ekko_v1_active_conversation');
+    } catch (e) {
+      out.appendChild(row('localStorage parse', 'failed: ' + e.message, 'bad'));
+    }
+    out.appendChild(row('local conversations (this device)', convoCount));
+    out.appendChild(row('local messages total (this device)', totalLocalMsgs));
+    out.appendChild(row('local active convo id', activeConvoId));
+
+    // try fetching cloud conversations as this session
+    try {
+      const { data, error } = await sb
+        .from('conversations')
+        .select('id, title, updated_at')
+        .order('updated_at', { ascending: false });
+      if (error) {
+        out.appendChild(row('cloud convos fetch', 'ERROR: ' + JSON.stringify(error), 'bad'));
+      } else {
+        out.appendChild(row('cloud convos visible to this session', (data || []).length));
+        const titles = (data || []).map(c => `${c.title || '(untitled)'} — ${c.updated_at}`).join('\n');
+        out.appendChild(row('cloud convo titles (this session)', titles || '(none returned)'));
+      }
+    } catch (e) {
+      out.appendChild(row('cloud convos fetch', 'threw: ' + e.message, 'bad'));
+    }
+
+    // count cloud messages visible to this session
+    try {
+      const { count, error } = await sb
+        .from('messages')
+        .select('*', { count: 'exact', head: true });
+      if (error) {
+        out.appendChild(row('cloud messages visible to this session', 'ERROR: ' + JSON.stringify(error), 'bad'));
+      } else {
+        out.appendChild(row('cloud messages visible to this session', count));
+      }
+    } catch (e) {
+      out.appendChild(row('cloud messages visible to this session', 'threw: ' + e.message, 'bad'));
+    }
+  })();
+} else {
+// ============================================================
 // SUPABASE CONFIG
 // ============================================================
 const SUPABASE_URL = 'https://bzfccjqtygjrtoojvhiv.supabase.co';
@@ -4924,6 +5081,7 @@ populateHeaderSwitcher();
     showAuthScreen();
   }
 })();
+} // end of normal-mode else (diagnose mode skips everything above)
 </script>
 </body>
 </html>
