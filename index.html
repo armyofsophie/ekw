@@ -2793,11 +2793,12 @@ const EMBEDDING_DIM = 1536;
 const _embedCache = new Map();
 const _EMBED_CACHE_MAX = 50;
 
-async function embedText(text) {
-  if (!state.openaiKey) return null;
-  if (!text || !text.trim()) return null;
-  const key = text.slice(0, 500); // cache key; messages are usually short
-  if (_embedCache.has(key)) return _embedCache.get(key);
+async function embedText(text, verbose = false) {
+  const ret = (vec, reason) => verbose ? { vec, reason } : vec;
+  if (!state.openaiKey) return ret(null, 'no openai key');
+  if (!text || !text.trim()) return ret(null, 'empty text');
+  const key = text.slice(0, 500);
+  if (_embedCache.has(key)) return ret(_embedCache.get(key), null);
   try {
     const res = await fetch('https://api.openai.com/v1/embeddings', {
       method: 'POST',
@@ -2813,44 +2814,45 @@ async function embedText(text) {
     if (!res.ok) {
       const errText = await res.text().catch(() => '');
       console.warn('embedding failed:', res.status, errText.slice(0, 200));
-      return null;
+      return ret(null, `openai ${res.status}: ${errText.slice(0, 200)}`);
     }
     const data = await res.json();
     const vec = data && data.data && data.data[0] && data.data[0].embedding;
     if (!Array.isArray(vec) || vec.length !== EMBEDDING_DIM) {
       console.warn('embedding response had unexpected shape', data);
-      return null;
+      return ret(null, 'unexpected response shape');
     }
     if (_embedCache.size >= _EMBED_CACHE_MAX) {
-      // drop oldest
       const firstKey = _embedCache.keys().next().value;
       _embedCache.delete(firstKey);
     }
     _embedCache.set(key, vec);
-    return vec;
+    return ret(vec, null);
   } catch (e) {
     console.warn('embedding network error', e);
-    return null;
+    return ret(null, 'network: ' + (e.message || e));
   }
 }
 
 // embed a memory and write the vector to supabase.
 // idempotent — safe to call repeatedly. silently no-ops without keys.
 async function embedAndStoreMemory(memId, title, body) {
-  if (!state.openaiKey) return false;
-  if (!sb) return false;
+  if (!state.openaiKey) return { ok: false, reason: 'no openai key' };
+  if (!sb) return { ok: false, reason: 'no supabase client' };
   const session = await sb.auth.getSession();
-  if (!session.data.session) return false;
-  // embed title + body together so titles add weight to retrieval
+  if (!session.data.session) return { ok: false, reason: 'not signed in' };
   const text = ((title || '') + '\n\n' + (body || '')).trim();
-  const vec = await embedText(text);
-  if (!vec) return false;
-  const { error } = await sb.from('memories').update({ embedding: vec }).eq('id', memId);
+  if (!text) return { ok: false, reason: 'empty memory body' };
+  const embedResult = await embedText(text, true); // verbose mode
+  if (!embedResult.vec) {
+    return { ok: false, reason: 'embed failed: ' + (embedResult.reason || 'unknown') };
+  }
+  const { error } = await sb.from('memories').update({ embedding: embedResult.vec }).eq('id', memId);
   if (error) {
     console.warn('failed to write embedding for', memId, error);
-    return false;
+    return { ok: false, reason: 'supabase update: ' + (error.message || JSON.stringify(error)) };
   }
-  return true;
+  return { ok: true };
 }
 
 // query supabase for the top N memories most similar to the message.
@@ -2895,17 +2897,23 @@ async function retrieveSemanticMatches(userText, limit = 5, threshold = 0.3) {
 async function backfillEmbeddings(onProgress) {
   if (!state.openaiKey) {
     showToast('add openai key in settings first', true);
-    return { done: 0, total: 0, skipped: memories.length };
+    return { done: 0, total: 0, failed: memories.length, reasons: ['no openai key'] };
   }
   const total = memories.length;
   let done = 0;
   let failed = 0;
+  const reasons = [];
   for (const m of memories) {
-    const ok = await embedAndStoreMemory(m.id, m.title, m.body);
-    if (ok) done++; else failed++;
+    const result = await embedAndStoreMemory(m.id, m.title, m.body);
+    if (result.ok) {
+      done++;
+    } else {
+      failed++;
+      if (reasons.length < 3) reasons.push(result.reason);
+    }
     if (onProgress) onProgress(done + failed, total);
   }
-  return { done, total, failed };
+  return { done, total, failed, reasons };
 }
 
 // the matching/injection logic
@@ -4409,11 +4417,17 @@ $('rebuildEmbeddingsBtn').addEventListener('click', async () => {
   });
   btn.textContent = oldLabel;
   btn.disabled = false;
-  const msg = result.failed
-    ? `done. ${result.done} embedded, ${result.failed} failed.`
-    : `done. all ${result.done} memories embedded.`;
-  status.textContent = msg;
-  showToast(msg, !!result.failed);
+  if (result.failed) {
+    const sample = result.reasons[0] || 'unknown';
+    const msg = `${result.done} embedded, ${result.failed} failed. first error: ${sample}`;
+    status.textContent = msg;
+    showToast(msg, true);
+    console.warn('backfill failure reasons:', result.reasons);
+  } else {
+    const msg = `done. all ${result.done} memories embedded.`;
+    status.textContent = msg;
+    showToast(msg);
+  }
 });
 
 $('memIndicator').addEventListener('click', openInjectModal);
