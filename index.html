@@ -1486,6 +1486,12 @@
       </div>
 
       <div class="field">
+        <label for="openaiKey">openai api key (memory embeddings)</label>
+        <input type="password" id="openaiKey" placeholder="sk-..." spellcheck="false" autocomplete="off" />
+        <div class="help">used only for embedding memories so retrieval is semantic instead of keyword-based. costs pennies. leave blank to fall back to keyword matching.</div>
+      </div>
+
+      <div class="field">
         <label for="model">model</label>
         <select id="model">
           <optgroup label="xiaomi">
@@ -1573,9 +1579,9 @@
       </div>
 
       <div class="field">
-        <label for="maxMemInject">max keyword-matched memories per turn</label>
+        <label for="maxMemInject">max retrieved memories per turn</label>
         <input type="number" id="maxMemInject" min="0" max="10" value="3" />
-        <div class="help">pinned memories always load. this is the cap on extra ones matched by keyword.</div>
+        <div class="help">pinned memories always load. this caps how many extra ones get retrieved each turn (semantic if openai key set, keyword otherwise).</div>
       </div>
 
       <div class="field">
@@ -1602,7 +1608,10 @@
           <button class="btn" id="importMemBtn">import</button>
         </div>
         <input type="file" id="importMemFile" accept="application/json" style="display:none;" />
-        <div class="footnote">pinned memories load every turn. others fire when their keywords match what you're saying.</div>
+        <div class="btn-row" style="margin-top:8px;">
+          <button class="btn" id="rebuildEmbeddingsBtn">rebuild embeddings</button>
+        </div>
+        <div class="footnote" id="embeddingsStatus">pinned memories load every turn. with an openai key set, others retrieve semantically; without, by keyword.</div>
       </div>
 
     </div>
@@ -1833,6 +1842,7 @@ const ACTIVE_CONVO_KEY = 'ekko_v1_active_conversation';
 
 const defaults = {
   apiKey: '',
+  openaiKey: '', // for memory embeddings only — never used for chat completions
   model: 'deepseek/deepseek-v3.2',
   customModel: '',
   temp: 1.0,
@@ -2026,6 +2036,7 @@ const toast = $('toast');
 // hydrate settings inputs
 function hydrate() {
   $('apiKey').value = state.apiKey;
+  $('openaiKey').value = state.openaiKey || '';
   $('model').value = isKnownModel(state.model) ? state.model : '__custom__';
   $('customModel').value = state.customModel || (isKnownModel(state.model) ? '' : state.model);
   $('customModelField').style.display = $('model').value === '__custom__' ? 'flex' : 'none';
@@ -2536,6 +2547,7 @@ function saveMemFromModal() {
     : [];
 
   const now = Date.now();
+  let savedMemId = null;
 
   if (editingMemId) {
     const m = memories.find(x => x.id === editingMemId);
@@ -2546,10 +2558,12 @@ function saveMemFromModal() {
       m.priority = priority;
       m.tokens = estimateTokens(body);
       m.updatedAt = now;
+      savedMemId = m.id;
     }
   } else {
+    const newId = newMemId();
     memories.push({
-      id: newMemId(),
+      id: newId,
       title,
       body,
       keywords,
@@ -2558,12 +2572,22 @@ function saveMemFromModal() {
       createdAt: now,
       updatedAt: now,
     });
+    savedMemId = newId;
   }
 
   saveMemories();
   renderMemList();
   closeMemModal();
   showToast('saved');
+
+  // fire-and-forget: re-embed this memory in the background.
+  // saves the user from waiting on the network call. if it fails, the
+  // memory is still saved (just without an updated vector).
+  if (savedMemId && state.openaiKey) {
+    embedAndStoreMemory(savedMemId, title, body).catch(e => {
+      console.warn('embed-on-write failed for', savedMemId, e);
+    });
+  }
 }
 
 function deleteCurrentMem() {
@@ -2576,59 +2600,217 @@ function deleteCurrentMem() {
   showToast('deleted');
 }
 
+// ============================================================
+// EMBEDDINGS
+// ============================================================
+// when state.openaiKey is set, memories get embedded on write and the active
+// memory's body+title becomes a vector. on each turn, the user's message is
+// also embedded and we query supabase via the match_memories rpc to find the
+// top semantically-nearest memories, instead of (or in addition to) keyword
+// matching.
+//
+// when no openai key is set, this all silently no-ops and we fall back to
+// the keyword retrieval path.
+
+const EMBEDDING_MODEL = 'text-embedding-3-small';
+const EMBEDDING_DIM = 1536;
+
+// in-flight cache so we don't re-embed the same query mid-session.
+// keyed on the exact text. small bound just in case.
+const _embedCache = new Map();
+const _EMBED_CACHE_MAX = 50;
+
+async function embedText(text) {
+  if (!state.openaiKey) return null;
+  if (!text || !text.trim()) return null;
+  const key = text.slice(0, 500); // cache key; messages are usually short
+  if (_embedCache.has(key)) return _embedCache.get(key);
+  try {
+    const res = await fetch('https://api.openai.com/v1/embeddings', {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + state.openaiKey,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: EMBEDDING_MODEL,
+        input: text,
+      }),
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      console.warn('embedding failed:', res.status, errText.slice(0, 200));
+      return null;
+    }
+    const data = await res.json();
+    const vec = data && data.data && data.data[0] && data.data[0].embedding;
+    if (!Array.isArray(vec) || vec.length !== EMBEDDING_DIM) {
+      console.warn('embedding response had unexpected shape', data);
+      return null;
+    }
+    if (_embedCache.size >= _EMBED_CACHE_MAX) {
+      // drop oldest
+      const firstKey = _embedCache.keys().next().value;
+      _embedCache.delete(firstKey);
+    }
+    _embedCache.set(key, vec);
+    return vec;
+  } catch (e) {
+    console.warn('embedding network error', e);
+    return null;
+  }
+}
+
+// embed a memory and write the vector to supabase.
+// idempotent — safe to call repeatedly. silently no-ops without keys.
+async function embedAndStoreMemory(memId, title, body) {
+  if (!state.openaiKey) return false;
+  if (!sb) return false;
+  const session = await sb.auth.getSession();
+  if (!session.data.session) return false;
+  // embed title + body together so titles add weight to retrieval
+  const text = ((title || '') + '\n\n' + (body || '')).trim();
+  const vec = await embedText(text);
+  if (!vec) return false;
+  const { error } = await sb.from('memories').update({ embedding: vec }).eq('id', memId);
+  if (error) {
+    console.warn('failed to write embedding for', memId, error);
+    return false;
+  }
+  return true;
+}
+
+// query supabase for the top N memories most similar to the message.
+// returns array of {memory, similarity} or [] on any failure.
+// memories are looked up by id in the local memories array (so we keep all the
+// local fields like priority/keywords/updatedAt that the rest of the app uses).
+async function retrieveSemanticMatches(userText, limit = 5, threshold = 0.3) {
+  if (!state.openaiKey) return [];
+  if (!sb) return [];
+  const session = await sb.auth.getSession();
+  if (!session.data.session) return [];
+  const userId = session.data.session.user.id;
+  const queryVec = await embedText(userText);
+  if (!queryVec) return [];
+  try {
+    const { data, error } = await sb.rpc('match_memories', {
+      query_embedding: queryVec,
+      match_threshold: threshold,
+      match_count: limit,
+      user_id_filter: userId,
+    });
+    if (error) {
+      console.warn('match_memories rpc failed', error);
+      return [];
+    }
+    if (!Array.isArray(data)) return [];
+    // resolve each match back to the local memory object
+    const results = [];
+    for (const row of data) {
+      const local = memories.find(m => m.id === row.id);
+      if (local) results.push({ memory: local, similarity: row.similarity });
+    }
+    return results;
+  } catch (e) {
+    console.warn('semantic retrieval threw', e);
+    return [];
+  }
+}
+
+// backfill: embed any memory that doesn't yet have a vector.
+// progress callback gets called with (done, total) so the ui can update.
+async function backfillEmbeddings(onProgress) {
+  if (!state.openaiKey) {
+    showToast('add openai key in settings first', true);
+    return { done: 0, total: 0, skipped: memories.length };
+  }
+  const total = memories.length;
+  let done = 0;
+  let failed = 0;
+  for (const m of memories) {
+    const ok = await embedAndStoreMemory(m.id, m.title, m.body);
+    if (ok) done++; else failed++;
+    if (onProgress) onProgress(done + failed, total);
+  }
+  return { done, total, failed };
+}
+
 // the matching/injection logic
-function selectMemoriesForMessage(userText, sceneActive) {
+// async because semantic retrieval needs to await an embedding call.
+// pinned + scene-pack memories load deterministically as before.
+// for the keyword/match slot:
+//   - if openai key set → semantic retrieval via embeddings
+//   - else → fall back to keyword matching (unchanged)
+async function selectMemoriesForMessage(userText, sceneActive) {
   const text = userText.toLowerCase();
   const pinned = [];
   const scenePack = [];
-  const matched = [];
 
+  // first pass: pinned and scene-pack are deterministic
+  const candidates = []; // memories that aren't pinned/scene — eligible for keyword OR semantic match
   for (const m of memories) {
     if (m.priority === 'pinned') {
       pinned.push({ memory: m, reason: 'pinned' });
       continue;
     }
     if (m.priority === 'scene') {
-      // scene-priority memories auto-load when scene rules are firing,
-      // bypassing keyword matching. during normal convo they behave like
-      // low-priority keyword memories so canon still reaches conversation
-      // if she explicitly names it.
       if (sceneActive) {
         scenePack.push({ memory: m, reason: 'scene pack' });
         continue;
       }
-      // fall through to keyword matching for non-scene turns
+      // fall through to candidate pool for non-scene turns
     }
-    if (!m.keywords || !m.keywords.length) continue;
-    const hits = m.keywords.filter(k => {
-      if (!k) return false;
-      // tags (#-prefixed) are organisational, not triggers — skip them
-      if (k.startsWith('#')) return false;
-      // whole-word match, so "art" doesn't fire on "start" and "memory"
-      // doesn't fire on "memorise". escape regex metachars to stay safe.
-      const escaped = k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      const re = new RegExp('(^|[^a-z0-9])' + escaped + '([^a-z0-9]|$)', 'i');
-      return re.test(text);
-    });
-    if (hits.length > 0) {
-      matched.push({ memory: m, reason: 'keyword: ' + hits.join(', '), hitCount: hits.length });
-    }
+    candidates.push(m);
   }
 
-  // sort matched: priority then hit count then recency
-  const priorityOrder = { high: 0, medium: 1, low: 2 };
-  matched.sort((a, b) => {
-    const pa = priorityOrder[a.memory.priority] ?? 3;
-    const pb = priorityOrder[b.memory.priority] ?? 3;
-    if (pa !== pb) return pa - pb;
-    if (b.hitCount !== a.hitCount) return b.hitCount - a.hitCount;
-    return (b.memory.updatedAt || 0) - (a.memory.updatedAt || 0);
-  });
-
   const limit = state.maxMemInject || 0;
-  // pinned + scenePack both bypass the matchInject cap — they always load
-  // when they qualify. only keyword-matched memories are capped.
-  return [...pinned, ...scenePack, ...matched.slice(0, limit)];
+  let matched = [];
+
+  // semantic retrieval first if we have a key
+  if (state.openaiKey && limit > 0) {
+    const semantic = await retrieveSemanticMatches(userText, limit, 0.3);
+    // exclude any that are already in pinned/scene to avoid dupes
+    const excluded = new Set([...pinned, ...scenePack].map(s => s.memory.id));
+    matched = semantic
+      .filter(s => !excluded.has(s.memory.id))
+      .slice(0, limit)
+      .map(s => ({
+        memory: s.memory,
+        reason: 'semantic: ' + (s.similarity * 100).toFixed(0) + '%',
+        similarity: s.similarity,
+      }));
+  }
+
+  // fall back to keyword matching if semantic returned nothing
+  // (either no key, no matches above threshold, or rpc/network failure)
+  if (matched.length === 0 && limit > 0) {
+    const keywordMatches = [];
+    for (const m of candidates) {
+      if (!m.keywords || !m.keywords.length) continue;
+      const hits = m.keywords.filter(k => {
+        if (!k) return false;
+        if (k.startsWith('#')) return false;
+        const escaped = k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const re = new RegExp('(^|[^a-z0-9])' + escaped + '([^a-z0-9]|$)', 'i');
+        return re.test(text);
+      });
+      if (hits.length > 0) {
+        keywordMatches.push({ memory: m, reason: 'keyword: ' + hits.join(', '), hitCount: hits.length });
+      }
+    }
+    const priorityOrder = { high: 0, medium: 1, low: 2 };
+    keywordMatches.sort((a, b) => {
+      const pa = priorityOrder[a.memory.priority] ?? 3;
+      const pb = priorityOrder[b.memory.priority] ?? 3;
+      if (pa !== pb) return pa - pb;
+      if (b.hitCount !== a.hitCount) return b.hitCount - a.hitCount;
+      return (b.memory.updatedAt || 0) - (a.memory.updatedAt || 0);
+    });
+    matched = keywordMatches.slice(0, limit);
+  }
+
+  // pinned + scenePack always load. only the matched slot is capped.
+  return [...pinned, ...scenePack, ...matched];
 }
 
 // detect whether the scene rules should fire on this turn
@@ -2660,9 +2842,9 @@ function shouldLoadSceneRules(userText) {
   return false;
 }
 
-function buildSystemMessage(userText) {
+async function buildSystemMessage(userText) {
   const sceneActive = shouldLoadSceneRules(userText);
-  const selected = selectMemoriesForMessage(userText, sceneActive);
+  const selected = await selectMemoriesForMessage(userText, sceneActive);
   lastInjection = selected;
   updateMemIndicator();
 
@@ -3143,7 +3325,7 @@ async function sendMessage() {
     };
   });
 
-  const systemContent = buildSystemMessage(text);
+  const systemContent = await buildSystemMessage(text);
 
   const payload = {
     model: state.model === '__custom__' ? state.customModel : state.model,
@@ -3903,6 +4085,7 @@ $('headerModelSwitcher').addEventListener('change', e => {
 // save settings
 $('saveBtn').addEventListener('click', () => {
   state.apiKey = $('apiKey').value.trim();
+  state.openaiKey = $('openaiKey').value.trim();
   const modelVal = $('model').value;
   if (modelVal === '__custom__') {
     const custom = $('customModel').value.trim();
@@ -4035,6 +4218,29 @@ $('importMemFile').addEventListener('change', e => {
   const file = e.target.files[0];
   if (file) importMemoriesJson(file);
   e.target.value = '';
+});
+
+$('rebuildEmbeddingsBtn').addEventListener('click', async () => {
+  if (!state.openaiKey) {
+    showToast('add an openai key in settings first', true);
+    return;
+  }
+  if (!confirm(`re-embed all ${memories.length} memories? this calls the openai api once per memory and may take a moment.`)) return;
+  const btn = $('rebuildEmbeddingsBtn');
+  const status = $('embeddingsStatus');
+  const oldLabel = btn.textContent;
+  btn.disabled = true;
+  const result = await backfillEmbeddings((done, total) => {
+    btn.textContent = `embedding ${done}/${total}…`;
+    status.textContent = `embedding ${done} of ${total}…`;
+  });
+  btn.textContent = oldLabel;
+  btn.disabled = false;
+  const msg = result.failed
+    ? `done. ${result.done} embedded, ${result.failed} failed.`
+    : `done. all ${result.done} memories embedded.`;
+  status.textContent = msg;
+  showToast(msg, !!result.failed);
 });
 
 $('memIndicator').addEventListener('click', openInjectModal);
