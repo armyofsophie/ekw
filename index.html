@@ -2103,7 +2103,7 @@ function createConversation(title) {
 }
 
 // switch to a different conversation
-function switchConversation(convoId) {
+async function switchConversation(convoId) {
   if (isStreaming) return;
   // save current conversation's messages
   if (activeConvoId) {
@@ -2112,6 +2112,22 @@ function switchConversation(convoId) {
   activeConvoId = convoId;
   localStorage.setItem(ACTIVE_CONVO_KEY, convoId);
   messages = loadMessagesForConvo(convoId);
+
+  // if this conversation has no messages locally but cloud is ready,
+  // try to pull them. covers the case where another device wrote the
+  // conversation but this device never fetched its messages.
+  if (messages.length === 0 && cloudReady && currentUser) {
+    try {
+      const cloudMsgs = await fetchCloudMessages(convoId);
+      if (cloudMsgs.length > 0) {
+        messages = cloudMsgs;
+        localStorage.setItem('ekko_v1_chat_' + convoId, JSON.stringify(messages));
+      }
+    } catch (e) {
+      console.warn('cloud fetch on switch failed', e);
+    }
+  }
+
   render();
   scrollToBottom();
   renderConvoList();
@@ -4546,11 +4562,12 @@ async function fetchCloudSettings() {
   return data?.data || null;
 }
 
-async function fetchCloudMessages() {
-  if (!activeConvoId) return [];
+async function fetchCloudMessages(convoId) {
+  const targetId = convoId || activeConvoId;
+  if (!targetId) return [];
   const { data, error } = await sb.from('messages')
     .select('id, position, role, content, proposals, attachments')
-    .eq('conversation_id', activeConvoId)
+    .eq('conversation_id', targetId)
     .order('position', { ascending: true });
   if (error) throw error;
   return (data || []).map(row => {
