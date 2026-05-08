@@ -836,6 +836,42 @@
   .btn.primary { background: var(--ink); color: #000; border-color: var(--ink); }
 
   .btn-row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .saved-models-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .saved-models-list:empty + .help { display: block; }
+  .saved-models-list:not(:empty) + .help { display: none; }
+  .saved-model-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    background: var(--bg-elev);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    font-size: 13px;
+  }
+  .saved-model-id {
+    flex: 1;
+    font-family: ui-monospace, monospace;
+    font-size: 12px;
+    color: var(--ink);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .saved-model-delete {
+    background: none;
+    border: none;
+    color: var(--ink-dim);
+    cursor: pointer;
+    padding: 4px 8px;
+    font-size: 16px;
+    line-height: 1;
+  }
+  .saved-model-delete:hover { color: var(--danger); }
 
   .divider {
     height: 1px;
@@ -1526,7 +1562,16 @@
       <div class="field" id="customModelField" style="display:none;">
         <label for="customModel">custom model id</label>
         <input type="text" id="customModel" placeholder="provider/model-name" spellcheck="false" />
-        <div class="help">any model id from openrouter.ai/models</div>
+        <div class="help">any model id from openrouter.ai/models. tap save below to add it to the dropdown permanently.</div>
+        <div class="btn-row" style="margin-top:8px;">
+          <button class="btn" id="saveCustomModelBtn">save to dropdown</button>
+        </div>
+      </div>
+
+      <div class="field" id="savedCustomModelsField">
+        <label>saved custom models</label>
+        <div id="savedCustomModelsList" class="saved-models-list"></div>
+        <div class="help" id="savedCustomModelsEmptyHelp">none yet. select "custom model id" above and tap save to add one.</div>
       </div>
 
       <div class="row">
@@ -1539,7 +1584,17 @@
           <input type="number" id="repPenalty" step="0.05" min="1" max="2" value="1.15" />
         </div>
       </div>
-      <div class="footnote">guide defaults: temperature 1.0, repetition penalty 1.15.</div>
+      <div class="row">
+        <div class="field">
+          <label for="freqPenalty">frequency penalty</label>
+          <input type="number" id="freqPenalty" step="0.05" min="-2" max="2" value="0" />
+        </div>
+        <div class="field">
+          <label for="presencePenalty">presence penalty</label>
+          <input type="number" id="presencePenalty" step="0.05" min="-2" max="2" value="0" />
+        </div>
+      </div>
+      <div class="footnote">defaults: temp 1.0, rep penalty 1.15, frequency 0, presence 0. negative penalties encourage repetition; positive penalties discourage it. zero = ignored. not all models honour these.</div>
 
     </div>
 
@@ -1985,8 +2040,11 @@ const defaults = {
   openaiKey: '', // for memory embeddings only — never used for chat completions
   model: 'deepseek/deepseek-v3.2',
   customModel: '',
+  savedCustomModels: [], // [{id, label}] — permanently in the dropdown
   temp: 1.0,
   repPenalty: 1.0,
+  freqPenalty: 0,
+  presencePenalty: 0,
   prompt: '',
   ctxLength: 16,
   maxMemInject: 3,
@@ -2196,12 +2254,16 @@ function hydrate() {
   $('customModelField').style.display = $('model').value === '__custom__' ? 'flex' : 'none';
   $('temp').value = state.temp;
   $('repPenalty').value = state.repPenalty;
+  $('freqPenalty').value = state.freqPenalty ?? 0;
+  $('presencePenalty').value = state.presencePenalty ?? 0;
   $('prompt').value = state.prompt;
   $('ctxLength').value = state.ctxLength;
   $('maxMemInject').value = state.maxMemInject;
   $('typingSpeed').value = state.typingSpeed;
   $('typingPauses').value = String(state.typingPauses);
   $('selfWriteMemory').value = String(state.selfWriteMemory);
+  populateSavedCustomModels();
+  renderSavedCustomModelsList();
 }
 function isKnownModel(id) {
   return Array.from($('model').options).some(o => o.value === id && o.value !== '__custom__');
@@ -3450,6 +3512,13 @@ async function sendMessage() {
     repetition_penalty: parseFloat(state.repPenalty),
     stream: true,
   };
+  // only send freq/presence penalties when set — keeps payloads clean for
+  // models that don't honour them, and avoids unintentionally clamping
+  // randomness on models that default to non-zero.
+  const freq = parseFloat(state.freqPenalty);
+  if (!isNaN(freq) && freq !== 0) payload.frequency_penalty = freq;
+  const pres = parseFloat(state.presencePenalty);
+  if (!isNaN(pres) && pres !== 0) payload.presence_penalty = pres;
 
   // shared state between fetcher and painter
   let streamEl = null;
@@ -4039,6 +4108,10 @@ $('model').addEventListener('change', e => {
   $('customModelField').style.display = e.target.value === '__custom__' ? 'flex' : 'none';
 });
 
+$('saveCustomModelBtn').addEventListener('click', () => {
+  addSavedCustomModel($('customModel').value);
+});
+
 // ===== scroll tracking + auto-follow =====
 // autoFollow starts true on each send. the painter scrolls to bottom on each
 // character while autoFollow is true. the moment the user scrolls up (or
@@ -4113,6 +4186,95 @@ document.addEventListener('visibilitychange', async () => {
 });
 
 // ===== header model switcher =====
+// ============================================================
+// SAVED CUSTOM MODELS
+// ============================================================
+// permanently-saved custom model ids that show in the model dropdown
+// alongside the built-in groups, under their own "saved" optgroup.
+function populateSavedCustomModels() {
+  const drawer = $('model');
+  // remove any existing saved-models optgroup (idempotent)
+  const existing = drawer.querySelector('optgroup[data-saved="true"]');
+  if (existing) existing.remove();
+
+  const saved = state.savedCustomModels || [];
+  if (saved.length === 0) return;
+
+  const og = document.createElement('optgroup');
+  og.label = 'saved';
+  og.dataset.saved = 'true';
+  for (const m of saved) {
+    const o = document.createElement('option');
+    o.value = m.id;
+    o.textContent = m.label || m.id;
+    og.appendChild(o);
+  }
+  // insert before the one-shot custom option so it appears above
+  const customOption = drawer.querySelector('option[value="__custom__"]');
+  if (customOption) {
+    drawer.insertBefore(og, customOption);
+  } else {
+    drawer.appendChild(og);
+  }
+}
+
+function renderSavedCustomModelsList() {
+  const list = $('savedCustomModelsList');
+  list.innerHTML = '';
+  const saved = state.savedCustomModels || [];
+  for (const m of saved) {
+    const row = document.createElement('div');
+    row.className = 'saved-model-row';
+    const idEl = document.createElement('div');
+    idEl.className = 'saved-model-id';
+    idEl.textContent = m.id;
+    const delBtn = document.createElement('button');
+    delBtn.className = 'saved-model-delete';
+    delBtn.textContent = '×';
+    delBtn.title = 'remove';
+    delBtn.addEventListener('click', () => removeSavedCustomModel(m.id));
+    row.appendChild(idEl);
+    row.appendChild(delBtn);
+    list.appendChild(row);
+  }
+}
+
+function addSavedCustomModel(modelId) {
+  const id = (modelId || '').trim();
+  if (!id) {
+    showToast('enter a model id first', true);
+    return;
+  }
+  if (!id.includes('/')) {
+    showToast('model ids should look like provider/name', true);
+    return;
+  }
+  state.savedCustomModels = state.savedCustomModels || [];
+  if (state.savedCustomModels.some(m => m.id === id)) {
+    showToast('already saved', true);
+    return;
+  }
+  state.savedCustomModels.push({ id, label: id });
+  saveState();
+  populateSavedCustomModels();
+  renderSavedCustomModelsList();
+  // re-sync the header switcher so the new model appears there too
+  populateHeaderSwitcher();
+  syncHeaderSwitcherValue();
+  showToast('saved');
+}
+
+function removeSavedCustomModel(modelId) {
+  if (!confirm('remove ' + modelId + ' from the dropdown?')) return;
+  state.savedCustomModels = (state.savedCustomModels || []).filter(m => m.id !== modelId);
+  saveState();
+  populateSavedCustomModels();
+  renderSavedCustomModelsList();
+  populateHeaderSwitcher();
+  syncHeaderSwitcherValue();
+  showToast('removed');
+}
+
 function populateHeaderSwitcher() {
   const header = $('headerModelSwitcher');
   const drawer = $('model');
@@ -4211,6 +4373,10 @@ $('saveBtn').addEventListener('click', () => {
   state.temp = parseFloat($('temp').value) || 1.0;
   state.repPenalty = parseFloat($('repPenalty').value);
   if (isNaN(state.repPenalty)) state.repPenalty = 1.0;
+  state.freqPenalty = parseFloat($('freqPenalty').value);
+  if (isNaN(state.freqPenalty)) state.freqPenalty = 0;
+  state.presencePenalty = parseFloat($('presencePenalty').value);
+  if (isNaN(state.presencePenalty)) state.presencePenalty = 0;
   state.prompt = $('prompt').value;
   state.ctxLength = parseInt($('ctxLength').value) || 16;
   state.maxMemInject = parseInt($('maxMemInject').value);
