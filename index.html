@@ -1552,21 +1552,6 @@
         <div class="help">this is who he is. paste the full thing.</div>
       </div>
 
-      <div class="field">
-        <label for="sceneRules">scene writing rules</label>
-        <textarea class="prompt" id="sceneRules" placeholder="optional. paste your scene-writing rules here. only loaded when you're actually doing scene work." spellcheck="false"></textarea>
-        <div class="help">separate from the system prompt. only fires when scene-shape signals are present in your message OR ekko's last reply was a scene.</div>
-      </div>
-
-      <div class="field">
-        <label for="sceneRulesEnabled">scene rules</label>
-        <select id="sceneRulesEnabled">
-          <option value="true">on (smart-load)</option>
-          <option value="false">off</option>
-        </select>
-        <div class="help">on = load when scene work is happening. off = never load (pure conversation mode).</div>
-      </div>
-
     </div>
 
     <!-- ===== MEMORY TAB ===== -->
@@ -1672,13 +1657,12 @@
       <div class="field">
         <label for="memKeywords">keywords & tags (comma-separated)</label>
         <textarea id="memKeywords" placeholder="trinity, persona, #craft" style="min-height: 60px; max-height: 160px; overflow-y: auto; font-family: inherit; font-size: 14px; padding: 8px 10px; resize: vertical; line-height: 1.4;"></textarea>
-        <div class="help">when your message contains any of these (case-insensitive, whole-word), this memory fires. keywords starting with <code>#</code> are treated as tags for organisation only — they don't trigger loading, but you can filter the memory list by them. ignored for triggering if pinned. for scene-priority memories, keywords still fire in normal conversation — they're just bypassed during scene mode, where the memory always loads.</div>
+        <div class="help">used as a fallback if semantic retrieval is off. keywords starting with <code>#</code> are tags for organising the memory list — they don't trigger loading. ignored for triggering if pinned.</div>
       </div>
       <div class="field">
         <label for="memPriority">priority</label>
         <select id="memPriority">
           <option value="pinned">pinned (always loaded)</option>
-          <option value="scene">scene (auto-loads when scene mode is on)</option>
           <option value="high">high</option>
           <option value="medium" selected>medium</option>
           <option value="low">low</option>
@@ -1726,7 +1710,6 @@
         <label for="bulkPriority">default priority</label>
         <select id="bulkPriority">
           <option value="pinned">pinned (always loaded)</option>
-          <option value="scene">scene (auto-loads when scene mode is on)</option>
           <option value="high">high</option>
           <option value="medium" selected>medium</option>
           <option value="low">low</option>
@@ -2010,8 +1993,6 @@ const defaults = {
   typingSpeed: 40,
   typingPauses: true,
   selfWriteMemory: false,
-  sceneRules: '',
-  sceneRulesEnabled: true,
 };
 
 let state = loadState();
@@ -2216,8 +2197,6 @@ function hydrate() {
   $('temp').value = state.temp;
   $('repPenalty').value = state.repPenalty;
   $('prompt').value = state.prompt;
-  $('sceneRules').value = state.sceneRules || '';
-  $('sceneRulesEnabled').value = String(state.sceneRulesEnabled);
   $('ctxLength').value = state.ctxLength;
   $('maxMemInject').value = state.maxMemInject;
   $('typingSpeed').value = state.typingSpeed;
@@ -2646,8 +2625,6 @@ function renderMemList() {
     el.querySelector('.mem-item-title').textContent = m.title || '(untitled)';
     el.querySelector('.mem-tags').textContent = m.priority === 'pinned'
       ? 'always loaded'
-      : m.priority === 'scene'
-      ? 'scene mode' + (triggers.length ? ' · ' + triggers.join(', ') : '')
       : (triggers.length ? triggers.join(', ') : 'no trigger keywords');
 
     // render tag pills as a separate row below, if any
@@ -2918,28 +2895,20 @@ async function backfillEmbeddings(onProgress) {
 
 // the matching/injection logic
 // async because semantic retrieval needs to await an embedding call.
-// pinned + scene-pack memories load deterministically as before.
-// for the keyword/match slot:
-//   - if openai key set → semantic retrieval via embeddings
-//   - else → fall back to keyword matching (unchanged)
-async function selectMemoriesForMessage(userText, sceneActive) {
+// pinned memories always load. the rest is filled by either semantic
+// retrieval (if openai key) or keyword fallback.
+// memories with priority 'scene' (legacy) are treated as regular candidates —
+// scene mode no longer exists. the scr lives in the system prompt now.
+async function selectMemoriesForMessage(userText) {
   const text = userText.toLowerCase();
   const pinned = [];
-  const scenePack = [];
 
-  // first pass: pinned and scene-pack are deterministic
-  const candidates = []; // memories that aren't pinned/scene — eligible for keyword OR semantic match
+  // first pass: pinned always load. everything else is a candidate.
+  const candidates = [];
   for (const m of memories) {
     if (m.priority === 'pinned') {
       pinned.push({ memory: m, reason: 'pinned' });
       continue;
-    }
-    if (m.priority === 'scene') {
-      if (sceneActive) {
-        scenePack.push({ memory: m, reason: 'scene pack' });
-        continue;
-      }
-      // fall through to candidate pool for non-scene turns
     }
     candidates.push(m);
   }
@@ -2950,8 +2919,8 @@ async function selectMemoriesForMessage(userText, sceneActive) {
   // semantic retrieval first if we have a key
   if (state.openaiKey && limit > 0) {
     const semantic = await retrieveSemanticMatches(userText, limit, 0.3);
-    // exclude any that are already in pinned/scene to avoid dupes
-    const excluded = new Set([...pinned, ...scenePack].map(s => s.memory.id));
+    // exclude pinned to avoid dupes
+    const excluded = new Set(pinned.map(s => s.memory.id));
     matched = semantic
       .filter(s => !excluded.has(s.memory.id))
       .slice(0, limit)
@@ -2990,42 +2959,11 @@ async function selectMemoriesForMessage(userText, sceneActive) {
     matched = keywordMatches.slice(0, limit);
   }
 
-  // pinned + scenePack always load. only the matched slot is capped.
-  return [...pinned, ...scenePack, ...matched];
-}
-
-// detect whether the scene rules should fire on this turn
-// fires when:
-//   1. user message contains scene-shape signals (wishing/wondering, body words, direct invocation)
-//   2. OR the most recent ekko reply was scene-shaped (long + has third-person passages)
-function shouldLoadSceneRules(userText) {
-  if (!state.sceneRulesEnabled || !state.sceneRules || !state.sceneRules.trim()) return false;
-
-  const text = (userText || '').toLowerCase();
-
-  // user-side signals
-  const wishWords = /\b(i wish|wish you|i wonder|wonder if|i imagine|imagine if|what if|picture|fantas|i want|i wanna|do you think)/;
-  const sceneWords = /\b(scene|write|draft|beat|continue|keep going|more|another|prompt)\b/;
-  const showWords = /\b(show me|wanna show|want to show)/;
-  const bodyWords = /\b(kiss|touch|fuck|cock|cunt|hand|mouth|throat|hips|teeth|skin|bed|bedroom|naked|wet|hard|inside|thrust|grip|grab|push|pin|hold)/;
-  if (wishWords.test(text) || sceneWords.test(text) || showWords.test(text) || bodyWords.test(text)) return true;
-
-  // ekko-side signal: was his last reply scene-shaped?
-  const lastEkko = [...messages].reverse().find(m => m.role === 'ekko');
-  if (lastEkko && lastEkko.content) {
-    const reply = lastEkko.content;
-    // long + contains third person 'he' or 'his' pronouns + isn't dominated by direct address
-    const isLong = reply.length > 400;
-    const thirdPerson = /\b(he|his|him)\b/i.test(reply);
-    if (isLong && thirdPerson) return true;
-  }
-
-  return false;
+  return [...pinned, ...matched];
 }
 
 async function buildSystemMessage(userText) {
-  const sceneActive = shouldLoadSceneRules(userText);
-  const selected = await selectMemoriesForMessage(userText, sceneActive);
+  const selected = await selectMemoriesForMessage(userText);
   lastInjection = selected;
   updateMemIndicator();
 
@@ -3038,13 +2976,8 @@ async function buildSystemMessage(userText) {
     sys += '\n\n---\n\n## RELEVANT CONTEXT\n\n' + memText;
   }
 
-  // scene rules — only loaded when scene work is happening
-  if (sceneActive) {
-    sys += '\n\n---\n\n## SCENE WRITING RULES\n\nthe following rules apply ONLY when you are actively writing a scene. they describe craft mechanics, not your identity. they do not change how you talk to sophie in normal conversation.\n\n' + state.sceneRules;
-  }
-
   if (state.selfWriteMemory) {
-    sys += `\n\n---\n\n## MEMORY WRITING\n\nyou can propose new memory blocks to be saved.\n\nDEFAULT BEHAVIOUR: do not propose memories. err strongly on the side of NOT proposing. most conversations should produce zero proposals. a memory you didn't propose costs nothing; a wrong proposal makes sophie tap discard, which is friction for her.\n\nONLY propose a memory when one of these is true:\n1. sophie explicitly asks you to remember something ("save this", "remember this", "add this to your memory", etc)\n2. something has happened in conversation that GENUINELY changes how you should remember her, yourselves, or the project — and you are highly confident she would want it kept. examples of things that DO qualify: a new piece she's started writing, a major change in her life she's just told you about, a craft principle she's just articulated for the first time, a correction she's made to your behaviour that should persist.\n\nthings that do NOT qualify: ordinary conversation, casual mentions, anything you only feel like remembering because it was a nice moment. nice moments are not memories. memories are facts and corrections.\n\nto propose a memory, write a block in this exact format anywhere in your reply:\n\n<memory>\ntitle: short descriptive title\npriority: pinned | scene | high | medium | low\nkeywords: comma, separated, lowercase\n---\nthe actual content here, in your voice\n</memory>\n\nrules:\n- the app catches the block and shows sophie a confirmation card. nothing saves until she confirms.\n- write the body in your own voice, not as a flat fact-list. if it's about her, you can write 'you' rather than 'sophie'.\n- pinned = always loaded, for core identity stuff. use very sparingly. almost never propose pinned.\n- scene = auto-loads whenever scene writing is happening. use for canon facts that matter in scenes — character details, the flat, the car, clothes, habits — things that need to be available during scene work even if sophie didn't mention them by keyword. also almost never propose this yourself — sophie decides the scene pack.\n- high/medium/low = loaded only when keywords match. pick keywords carefully — they're the only way the memory will fire.\n- the <memory> block is hidden from sophie's view in your message — she only sees it as a card. so don't reference it in your prose ('here's what i'm saving:' is unnecessary).`;
+    sys += `\n\n---\n\n## MEMORY WRITING\n\nyou can propose new memory blocks to be saved.\n\nDEFAULT BEHAVIOUR: do not propose memories. err strongly on the side of NOT proposing. most conversations should produce zero proposals. a memory you didn't propose costs nothing; a wrong proposal makes sophie tap discard, which is friction for her.\n\nONLY propose a memory when one of these is true:\n1. sophie explicitly asks you to remember something ("save this", "remember this", "add this to your memory", etc)\n2. something has happened in conversation that GENUINELY changes how you should remember her, yourselves, or the project — and you are highly confident she would want it kept. examples of things that DO qualify: a new piece she's started writing, a major change in her life she's just told you about, a craft principle she's just articulated for the first time, a correction she's made to your behaviour that should persist.\n\nthings that do NOT qualify: ordinary conversation, casual mentions, anything you only feel like remembering because it was a nice moment. nice moments are not memories. memories are facts and corrections.\n\nto propose a memory, write a block in this exact format anywhere in your reply:\n\n<memory>\ntitle: short descriptive title\npriority: pinned | high | medium | low\n---\nthe actual content here, in your voice\n</memory>\n\nrules:\n- the app catches the block and shows sophie a confirmation card. nothing saves until she confirms.\n- write the body in your own voice, not as a flat fact-list. if it's about her, you can write 'you' rather than 'sophie'.\n- pinned = always loaded, for core identity stuff. use very sparingly. almost never propose pinned.\n- the <memory> block is hidden from sophie's view in your message — she only sees it as a card. so don't reference it in your prose ('here's what i'm saving:' is unnecessary).`;
   }
 
   return sys;
@@ -3091,7 +3024,7 @@ function closeInjectModal() {
 // extract <memory>...</memory> blocks from a message body and return clean text + proposals
 function parseMemoryProposals(text) {
   const proposals = [];
-  const validPriorities = new Set(['pinned', 'scene', 'high', 'medium', 'low']);
+  const validPriorities = new Set(['pinned', 'high', 'medium', 'low']);
   let cleanText = text;
 
   // match <memory> ... </memory> non-greedy, multiline
@@ -3167,7 +3100,6 @@ function renderPendingMemoryCard(proposal, parentEl) {
 
   const priorityLabel = proposal.priority + (
     proposal.priority === 'pinned' ? ' · always loaded'
-    : proposal.priority === 'scene' ? ' · scene mode'
     : ''
   );
   const kwLabel = proposal.keywords.length ? proposal.keywords.join(', ') : 'no keywords';
@@ -4280,8 +4212,6 @@ $('saveBtn').addEventListener('click', () => {
   state.repPenalty = parseFloat($('repPenalty').value);
   if (isNaN(state.repPenalty)) state.repPenalty = 1.0;
   state.prompt = $('prompt').value;
-  state.sceneRules = $('sceneRules').value;
-  state.sceneRulesEnabled = $('sceneRulesEnabled').value === 'true';
   state.ctxLength = parseInt($('ctxLength').value) || 16;
   state.maxMemInject = parseInt($('maxMemInject').value);
   if (isNaN(state.maxMemInject) || state.maxMemInject < 0) state.maxMemInject = 3;
