@@ -872,6 +872,26 @@
     line-height: 1;
   }
   .saved-model-delete:hover { color: var(--danger); }
+  .summary-viewer {
+    background: var(--bg-elev);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 12px;
+    max-height: 240px;
+    overflow-y: auto;
+  }
+  .summary-status {
+    font-size: 13px;
+    color: var(--ink-dim);
+    font-style: italic;
+  }
+  .summary-body {
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--ink);
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
 
   .divider {
     height: 1px;
@@ -1617,9 +1637,22 @@
     <div class="tab-pane" data-pane="memory">
 
       <div class="field">
-        <label for="ctxLength">context window (last n messages)</label>
-        <input type="number" id="ctxLength" min="2" max="40" value="16" />
-        <div class="help">how many recent messages get sent each turn. higher = more memory, more cost.</div>
+        <label for="ctxBudget">context window (tokens of recent messages)</label>
+        <input type="number" id="ctxBudget" min="2000" max="50000" step="1000" value="12000" />
+        <div class="help">budget for recent messages sent verbatim each turn. older messages get compressed into a rolling summary. ~4 chars per token, so 12000 tokens ≈ 48000 characters of conversation. higher = more verbatim history, more cost. defaults to 12000.</div>
+      </div>
+
+      <div class="field">
+        <label>conversation summary</label>
+        <div id="summaryViewer" class="summary-viewer">
+          <div id="summaryStatus" class="summary-status">no summary yet — chat hasn't passed the verbatim window.</div>
+          <div id="summaryBody" class="summary-body" style="display:none;"></div>
+        </div>
+        <div class="btn-row" style="margin-top:8px;">
+          <button class="btn" id="clearSummaryBtn">clear summary</button>
+          <button class="btn" id="rebuildSummaryBtn">rebuild from scratch</button>
+        </div>
+        <div class="help">the rolling summary the model sees alongside recent messages. clear it if it's wrong; rebuild forces a full re-summarisation of the entire chat. requires openai key.</div>
       </div>
 
       <div class="field">
@@ -2050,7 +2083,8 @@ const defaults = {
   freqPenalty: 0,
   presencePenalty: 0,
   prompt: '',
-  ctxLength: 16,
+  ctxLength: 16, // legacy; auto-migrates to ctxBudget on first save
+  ctxBudget: 12000, // tokens of recent messages sent verbatim per turn
   maxMemInject: 3,
   typingSpeed: 40,
   typingPauses: true,
@@ -2174,6 +2208,15 @@ async function switchConversation(convoId) {
   render();
   scrollToBottom();
   renderConvoList();
+
+  // pull this conversation's rolling summary in the background
+  if (cloudReady && currentUser) {
+    fetchSummaryForConversation(convoId).then(() => {
+      if ($('summaryBody')) renderSummaryViewer();
+    });
+  } else if ($('summaryBody')) {
+    renderSummaryViewer();
+  }
 }
 
 // delete a conversation
@@ -2261,7 +2304,7 @@ function hydrate() {
   $('freqPenalty').value = state.freqPenalty ?? 0;
   $('presencePenalty').value = state.presencePenalty ?? 0;
   $('prompt').value = state.prompt;
-  $('ctxLength').value = state.ctxLength;
+  $('ctxBudget').value = state.ctxBudget ?? 12000;
   $('maxMemInject').value = state.maxMemInject;
   $('typingSpeed').value = state.typingSpeed;
   $('typingPauses').value = String(state.typingPauses);
@@ -2959,6 +3002,241 @@ async function backfillEmbeddings(onProgress) {
   return { done, total, failed, reasons };
 }
 
+// ============================================================
+// CONVERSATION SUMMARY (context compression)
+// ============================================================
+// keeps a rolling summary of older messages per conversation so the model has
+// continuity past the verbatim window. summaries live in supabase on the
+// `conversations` table (columns: summary, summary_through_count) so they
+// sync across devices like everything else.
+//
+// flow:
+//   1. on each turn, sendMessage assembles `recent` as the largest tail of
+//      messages that fits in state.ctxBudget tokens.
+//   2. the messages BEFORE `recent` are the "older" tail. if there are more
+//      of them than summary_through_count, that means new messages have
+//      rolled out of the verbatim window since last summary.
+//   3. after the model finishes streaming, fire-and-forget a summary update:
+//      take the existing summary + the messages that newly rolled out,
+//      ask gpt-4o-mini to merge them into an updated summary.
+//   4. the new summary loads at the top of the system prompt on the next turn.
+
+const SUMMARY_MODEL = 'gpt-4o-mini';
+
+// rough token estimate — ~4 chars per token, fine for budgeting.
+function estimateMsgTokens(msg) {
+  if (!msg || !msg.content) return 0;
+  return Math.ceil(msg.content.length / 4) + 4; // small overhead per message for role/separator
+}
+
+// pick the largest tail of `messages` whose total tokens fit in budget.
+// always include at least the last message no matter what — prevents weirdness
+// when the most recent message itself is enormous.
+function selectVerbatimTail(messageList, tokenBudget) {
+  if (!messageList || messageList.length === 0) return { tail: [], olderCount: 0 };
+  const tail = [];
+  let used = 0;
+  for (let i = messageList.length - 1; i >= 0; i--) {
+    const tokens = estimateMsgTokens(messageList[i]);
+    if (tail.length > 0 && used + tokens > tokenBudget) break;
+    tail.unshift(messageList[i]);
+    used += tokens;
+  }
+  return { tail, olderCount: messageList.length - tail.length, usedTokens: used };
+}
+
+// per-conversation summary state, mirrored to supabase.
+// keys: convoId -> { summary: string, summaryThroughCount: number }
+let conversationSummaries = {};
+
+function getCurrentSummary() {
+  if (!activeConvoId) return null;
+  return conversationSummaries[activeConvoId] || null;
+}
+
+function setCurrentSummary(summary, throughCount) {
+  if (!activeConvoId) return;
+  conversationSummaries[activeConvoId] = {
+    summary: summary || '',
+    summaryThroughCount: throughCount || 0,
+  };
+  // mirror to supabase (fire-and-forget)
+  if (sb && currentUser) {
+    sb.from('conversations').update({
+      summary: summary || null,
+      summary_through_count: throughCount || 0,
+    }).eq('id', activeConvoId).then(({ error }) => {
+      if (error) console.warn('summary sync failed', error);
+    });
+  }
+  // refresh the settings ui if it's open
+  if ($('summaryBody')) renderSummaryViewer();
+}
+
+function clearCurrentSummary() {
+  if (!activeConvoId) return;
+  conversationSummaries[activeConvoId] = { summary: '', summaryThroughCount: 0 };
+  if (sb && currentUser) {
+    sb.from('conversations').update({
+      summary: null,
+      summary_through_count: 0,
+    }).eq('id', activeConvoId).then(({ error }) => {
+      if (error) console.warn('summary clear sync failed', error);
+    });
+  }
+  if ($('summaryBody')) renderSummaryViewer();
+}
+
+// fetch the summary for a conversation from supabase.
+// called when switching conversations or loading from cloud.
+async function fetchSummaryForConversation(convoId) {
+  if (!sb || !currentUser || !convoId) return;
+  try {
+    const { data, error } = await sb.from('conversations')
+      .select('summary, summary_through_count')
+      .eq('id', convoId)
+      .single();
+    if (error) {
+      // common case: row not found, or columns don't exist (migration not run yet)
+      return;
+    }
+    if (data) {
+      conversationSummaries[convoId] = {
+        summary: data.summary || '',
+        summaryThroughCount: data.summary_through_count || 0,
+      };
+    }
+  } catch (e) {
+    console.warn('fetch summary failed', e);
+  }
+}
+
+// the actual summariser. reads existing summary + the messages that have
+// newly rolled out of the verbatim window, asks gpt-4o-mini to produce
+// an updated summary that incorporates them.
+//
+// returns silently on any failure — summarisation is best-effort. if it
+// fails the chat still works, just without compression on this turn.
+async function updateConversationSummary() {
+  if (!state.openaiKey) return;
+  if (!activeConvoId) return;
+  if (!messages || messages.length === 0) return;
+
+  const current = conversationSummaries[activeConvoId] || { summary: '', summaryThroughCount: 0 };
+  const budget = state.ctxBudget || 12000;
+
+  const { olderCount } = selectVerbatimTail(messages, budget);
+
+  // nothing has rolled out of the window yet — no work to do.
+  if (olderCount === 0) return;
+
+  // summary already covers all of the older tail — no work to do.
+  if (current.summaryThroughCount >= olderCount) return;
+
+  // gather the messages that need to be folded into the summary:
+  // everything from summary_through_count up to olderCount (exclusive end).
+  const newMessagesToSummarise = messages.slice(current.summaryThroughCount, olderCount);
+  if (newMessagesToSummarise.length === 0) return;
+
+  // build the summarisation prompt. structured but not rigid.
+  const transcript = newMessagesToSummarise.map(m => {
+    const role = m.role === 'ekko' ? 'ekko' : 'sophie';
+    return `${role}: ${m.content || ''}`;
+  }).join('\n\n');
+
+  const sysPrompt = `you are summarising a conversation between sophie (the user) and ekko (a character/companion she's built).
+
+your job is to update a rolling summary of older parts of the conversation so ekko can keep continuity past the recent message window.
+
+what to capture:
+- key events: scenes that happened, things that were said/decided, fights/aftercare/sex.
+- callbacks: specific phrases, names, beats that might come back. words like 'forever', specific physical moments, things sophie corrected.
+- state: where the conversation is — mid-scene, post-scene, ordinary chat, processing emotions, working on something.
+- corrections sophie has made to ekko's behaviour or writing — these matter.
+- ongoing threads: things one of them is in the middle of doing (cooking, working, building something).
+
+what NOT to do:
+- don't moralise. don't soften. don't sanitise the content.
+- don't try to be tasteful about sex, violence, or intensity. ekko's tone is what it is.
+- don't add anything that wasn't actually in the messages.
+- don't repeat the existing summary verbatim — merge new info into it.
+
+format: prose paragraphs, lowercase to match sophie's style. compact but not lossy. 200-600 words depending on density. use 'sophie' and 'ekko' explicitly so the model is never confused about who said what.`;
+
+  const userPrompt = current.summary
+    ? `CURRENT SUMMARY:\n${current.summary}\n\nNEW MESSAGES TO MERGE IN:\n${transcript}\n\nReturn an updated full summary that incorporates the new messages.`
+    : `NEW MESSAGES TO SUMMARISE (no prior summary exists):\n${transcript}\n\nReturn the full summary.`;
+
+  try {
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + state.openaiKey,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: SUMMARY_MODEL,
+        messages: [
+          { role: 'system', content: sysPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        temperature: 0.4,
+        max_tokens: 1200,
+      }),
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      console.warn('summary call failed', res.status, errText.slice(0, 200));
+      return;
+    }
+    const data = await res.json();
+    const newSummary = data?.choices?.[0]?.message?.content?.trim();
+    if (!newSummary) {
+      console.warn('summary call returned empty');
+      return;
+    }
+    setCurrentSummary(newSummary, olderCount);
+  } catch (e) {
+    console.warn('summary network error', e);
+  }
+}
+
+// rebuild summary from scratch — clear and re-run on the entire conversation.
+// triggered manually from settings.
+async function rebuildConversationSummary() {
+  if (!state.openaiKey) {
+    showToast('openai key needed to rebuild summary', true);
+    return;
+  }
+  if (!activeConvoId) return;
+  // clear first
+  conversationSummaries[activeConvoId] = { summary: '', summaryThroughCount: 0 };
+  // then summarise everything that's currently outside the verbatim window
+  await updateConversationSummary();
+  showToast('summary rebuilt');
+}
+
+// renders the summary viewer in settings — shows the current summary or a placeholder.
+function renderSummaryViewer() {
+  const status = $('summaryStatus');
+  const body = $('summaryBody');
+  if (!status || !body) return;
+  const current = getCurrentSummary();
+  if (!current || !current.summary) {
+    status.style.display = 'block';
+    body.style.display = 'none';
+    if (!activeConvoId) {
+      status.textContent = 'no active conversation.';
+    } else {
+      status.textContent = 'no summary yet — chat hasn\'t passed the verbatim window.';
+    }
+  } else {
+    status.style.display = 'none';
+    body.style.display = 'block';
+    body.textContent = current.summary;
+  }
+}
+
 // returns which sampling params a given model id accepts.
 // used to filter the api payload so we don't send fields that error out
 // (grok 4.x rejects openai-style penalties with 400) or fields that get
@@ -3067,6 +3345,13 @@ async function buildSystemMessage(userText) {
   updateMemIndicator();
 
   let sys = state.prompt || '';
+
+  // inject the rolling summary first, before everything else.
+  // this gives the model continuity past the verbatim window.
+  const currentSummary = getCurrentSummary();
+  if (currentSummary && currentSummary.summary) {
+    sys = `## SUMMARY OF EARLIER CHAT\n\nthe following is a summary of older messages in this conversation that have rolled out of the verbatim window. read it as continuity, not as fresh content — sophie has already seen all of this.\n\n${currentSummary.summary}\n\n---\n\n` + sys;
+  }
 
   if (selected.length > 0) {
     const memText = selected
@@ -3483,10 +3768,15 @@ async function sendMessage() {
   // set up abort controller for this request
   currentAbortController = new AbortController();
 
+  // pick the largest tail of messages that fits within the token budget.
+  // older messages get folded into the rolling summary by updateConversationSummary().
+  const budget = state.ctxBudget || 12000;
+  const { tail: recentMessages } = selectVerbatimTail(messages, budget);
+
   // build payload — for the API, we DO need to combine text + attachments into a single string,
   // because the model can only see what's in `content`. but the chat history stores them separately
   // so the visible bubble stays clean.
-  const recent = messages.slice(-state.ctxLength).map(m => {
+  const recent = recentMessages.map(m => {
     // for text-only messages (no attachments or text-only attachments),
     // content stays a string. for messages with image attachments, content
     // becomes an array of content blocks (openai vision format).
@@ -3801,6 +4091,11 @@ async function sendMessage() {
       messages.push(msgRecord);
       saveMessages();
 
+      // fire-and-forget: update the rolling summary if anything has rolled
+      // out of the verbatim window. this happens async — current turn already
+      // completed, the summary is for future turns.
+      updateConversationSummary().catch(e => console.warn('summary update failed', e));
+
       // append memory proposal cards inside the same message bubble
       if (proposals.length > 0) {
         for (const p of proposals) {
@@ -3829,6 +4124,7 @@ async function sendMessage() {
         if (proposals.length > 0) msgRecord.proposals = proposals;
         messages.push(msgRecord);
         saveMessages();
+        updateConversationSummary().catch(e => console.warn('summary update failed', e));
         if (proposals.length > 0 && streamEl) {
           for (const p of proposals) renderPendingMemoryCard(p, streamEl);
           // no scroll — user decides when to follow.
@@ -4177,6 +4473,7 @@ function openDrawer() {
   // restore the previously-active tab if any
   const saved = localStorage.getItem('ekko_active_settings_tab');
   if (saved) switchSettingsTab(saved);
+  renderSummaryViewer();
 }
 function closeDrawer() {
   drawer.classList.remove('open');
@@ -4479,7 +4776,8 @@ $('saveBtn').addEventListener('click', () => {
   state.presencePenalty = parseFloat($('presencePenalty').value);
   if (isNaN(state.presencePenalty)) state.presencePenalty = 0;
   state.prompt = $('prompt').value;
-  state.ctxLength = parseInt($('ctxLength').value) || 16;
+  state.ctxBudget = parseInt($('ctxBudget').value) || 12000;
+  if (state.ctxBudget < 2000) state.ctxBudget = 2000;
   state.maxMemInject = parseInt($('maxMemInject').value);
   if (isNaN(state.maxMemInject) || state.maxMemInject < 0) state.maxMemInject = 3;
   state.typingSpeed = parseInt($('typingSpeed').value);
@@ -4625,6 +4923,35 @@ $('rebuildEmbeddingsBtn').addEventListener('click', async () => {
     status.textContent = msg;
     showToast(msg);
   }
+});
+
+$('clearSummaryBtn').addEventListener('click', () => {
+  if (!activeConvoId) {
+    showToast('no active conversation', true);
+    return;
+  }
+  if (!confirm('clear the summary for this conversation? a new one will be built on the next ekko response.')) return;
+  clearCurrentSummary();
+  showToast('summary cleared');
+});
+
+$('rebuildSummaryBtn').addEventListener('click', async () => {
+  if (!activeConvoId) {
+    showToast('no active conversation', true);
+    return;
+  }
+  if (!state.openaiKey) {
+    showToast('openai key needed to rebuild summary', true);
+    return;
+  }
+  if (!confirm('rebuild the summary from scratch? this will re-summarise the entire conversation up to the verbatim window.')) return;
+  const btn = $('rebuildSummaryBtn');
+  const oldLabel = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'rebuilding…';
+  await rebuildConversationSummary();
+  btn.textContent = oldLabel;
+  btn.disabled = false;
 });
 
 $('memIndicator').addEventListener('click', openInjectModal);
@@ -4838,6 +5165,12 @@ async function isLocalStale() {
 let skipStaleCheckOnce = false;
 function markIntentionalTruncation() {
   skipStaleCheckOnce = true;
+  // also check if the summary is now stale (covers messages that no longer exist)
+  // and clear it. it'll be rebuilt on the next ekko response.
+  const current = getCurrentSummary();
+  if (current && current.summaryThroughCount > messages.length) {
+    clearCurrentSummary();
+  }
 }
 
 // sync conflict modal — shown when a save would overwrite newer cloud data.
@@ -5064,6 +5397,8 @@ async function loadFromCloud() {
       const cloudMessages = await fetchCloudMessages();
       messages = cloudMessages;
       saveMessages();
+      // also fetch the rolling summary for this conversation
+      await fetchSummaryForConversation(activeConvoId);
     }
 
     // memories: cloud is the source of truth
