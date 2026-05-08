@@ -1574,27 +1574,31 @@
         <div class="help" id="savedCustomModelsEmptyHelp">none yet. select "custom model id" above and tap save to add one.</div>
       </div>
 
-      <div class="row">
-        <div class="field">
-          <label for="temp">temperature</label>
-          <input type="number" id="temp" step="0.05" min="0" max="2" value="1.0" />
-        </div>
-        <div class="field">
-          <label for="repPenalty">rep penalty</label>
-          <input type="number" id="repPenalty" step="0.05" min="1" max="2" value="1.15" />
-        </div>
+      <div class="field">
+        <label for="temp">temperature</label>
+        <input type="number" id="temp" step="0.05" min="0" max="2" value="1.0" />
+        <div class="help">how random the model's word choices are. 0 = deterministic, picks the most likely word every time. 1 = balanced. 2 = wild, sometimes nonsense. doesn't care about repetition — just shapes how surprising each next word is.</div>
       </div>
-      <div class="row">
-        <div class="field">
-          <label for="freqPenalty">frequency penalty</label>
-          <input type="number" id="freqPenalty" step="0.05" min="-2" max="2" value="0" />
-        </div>
-        <div class="field">
-          <label for="presencePenalty">presence penalty</label>
-          <input type="number" id="presencePenalty" step="0.05" min="-2" max="2" value="0" />
-        </div>
+
+      <div class="field">
+        <label for="repPenalty">repetition penalty</label>
+        <input type="number" id="repPenalty" step="0.05" min="1" max="2" value="1.15" />
+        <div class="help">discourages reusing words within the current response only — has no memory of past turns. each new response starts clean. 1.0 = off. 1.15 = mild. 1.5+ = aggressive, can hurt fluency. hits hard from the first repeat.</div>
       </div>
-      <div class="footnote">defaults: temp 1.0, rep penalty 1.15, frequency 0, presence 0. negative penalties encourage repetition; positive penalties discourage it. zero = ignored. not all models honour these.</div>
+
+      <div class="field">
+        <label for="freqPenalty">frequency penalty</label>
+        <input type="number" id="freqPenalty" step="0.05" min="-2" max="2" value="0" />
+        <div class="help">like rep penalty but ramps up the more a word's been used. one prior use = small penalty. five = bigger. only counts uses within the current response. positive pushes vocabulary variety, negative encourages reuse. 0 = off.</div>
+      </div>
+
+      <div class="field">
+        <label for="presencePenalty">presence penalty</label>
+        <input type="number" id="presencePenalty" step="0.05" min="-2" max="2" value="0" />
+        <div class="help">flat penalty once a word's appeared at all in the current response — same whether it appeared once or ten times. positive nudges toward new topics. negative keeps things on subject. 0 = off. resets every turn.</div>
+      </div>
+
+      <div class="footnote">all of these only see the current response, never past turns. defaults: temp 1.0, rep penalty 1.15, frequency 0, presence 0. settings are filtered per model automatically — not all models honour all four.</div>
 
     </div>
 
@@ -2955,6 +2959,39 @@ async function backfillEmbeddings(onProgress) {
   return { done, total, failed, reasons };
 }
 
+// returns which sampling params a given model id accepts.
+// used to filter the api payload so we don't send fields that error out
+// (grok 4.x rejects openai-style penalties with 400) or fields that get
+// silently dropped (anthropic drops both, openai's gpt-* drop repetition_penalty).
+//
+// when in doubt, default to permissive — most openai-compatible providers
+// (mimo, deepseek, gemini, kimi, minimax) honour the full set.
+function modelParamSupport(modelId) {
+  const id = (modelId || '').toLowerCase();
+
+  // grok 4.x family: rejects frequency/presence/stop/reasoning_effort
+  // (confirmed in xai docs and reproduced in n8n issues).
+  // does still accept repetition_penalty via openrouter normalisation.
+  if (/x-ai\/grok-4|xai\/grok-4|x-ai\/grok-4-1/.test(id)) {
+    return { repetitionPenalty: true, openaiPenalties: false };
+  }
+
+  // anthropic: native api accepts neither penalty type. through openrouter
+  // they're silently dropped — no errors, but no effect, so we omit to
+  // keep payloads clean.
+  if (id.startsWith('anthropic/')) {
+    return { repetitionPenalty: false, openaiPenalties: false };
+  }
+
+  // openai: accepts frequency/presence but not repetition_penalty.
+  if (id.startsWith('openai/')) {
+    return { repetitionPenalty: false, openaiPenalties: true };
+  }
+
+  // default: assume openai-compatible chat-completions, honour all.
+  return { repetitionPenalty: true, openaiPenalties: true };
+}
+
 // the matching/injection logic
 // async because semantic retrieval needs to await an embedding call.
 // pinned memories always load. the rest is filled by either semantic
@@ -3502,23 +3539,36 @@ async function sendMessage() {
 
   const systemContent = await buildSystemMessage(text);
 
+  const modelId = state.model === '__custom__' ? state.customModel : state.model;
+  const support = modelParamSupport(modelId);
+
   const payload = {
-    model: state.model === '__custom__' ? state.customModel : state.model,
+    model: modelId,
     messages: [
       { role: 'system', content: systemContent },
       ...recent,
     ],
     temperature: parseFloat(state.temp),
-    repetition_penalty: parseFloat(state.repPenalty),
     stream: true,
   };
-  // only send freq/presence penalties when set — keeps payloads clean for
-  // models that don't honour them, and avoids unintentionally clamping
-  // randomness on models that default to non-zero.
-  const freq = parseFloat(state.freqPenalty);
-  if (!isNaN(freq) && freq !== 0) payload.frequency_penalty = freq;
-  const pres = parseFloat(state.presencePenalty);
-  if (!isNaN(pres) && pres !== 0) payload.presence_penalty = pres;
+
+  // repetition_penalty — supported by most models, but not by openai's
+  // chat-completions or anthropic. anthropic silently drops; openai may
+  // error or get clamped. only send when the model accepts it.
+  if (support.repetitionPenalty) {
+    const rep = parseFloat(state.repPenalty);
+    if (!isNaN(rep) && rep !== 1.0) payload.repetition_penalty = rep;
+  }
+
+  // frequency_penalty / presence_penalty — openai-style. grok 4.x family
+  // returns 400 if these are present at all. anthropic silently drops.
+  // mimo and most openai-compatible models honour them.
+  if (support.openaiPenalties) {
+    const freq = parseFloat(state.freqPenalty);
+    if (!isNaN(freq) && freq !== 0) payload.frequency_penalty = freq;
+    const pres = parseFloat(state.presencePenalty);
+    if (!isNaN(pres) && pres !== 0) payload.presence_penalty = pres;
+  }
 
   // shared state between fetcher and painter
   let streamEl = null;
@@ -3871,44 +3921,95 @@ function renderAttachedFiles() {
   });
 }
 
+// downscale an image file to fit within maxEdge px on its longest side,
+// re-encode as jpeg at the given quality. returns a data url string.
+// keeps native size if the image is already small enough, but always
+// re-encodes as jpeg (so heif/png get converted too — heif isn't supported
+// by most vision apis, png is bloated for photos).
+async function downscaleImage(file, maxEdge = 1024, quality = 0.85) {
+  // load the file as an image element via object url (faster than dataurl)
+  const objectUrl = URL.createObjectURL(file);
+  const img = new Image();
+  try {
+    await new Promise((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = () => reject(new Error('image load failed'));
+      img.src = objectUrl;
+    });
+
+    const longest = Math.max(img.naturalWidth, img.naturalHeight);
+    const scale = longest > maxEdge ? maxEdge / longest : 1;
+    const w = Math.round(img.naturalWidth * scale);
+    const h = Math.round(img.naturalHeight * scale);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext('2d');
+    // smooth scaling for downscale
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+    ctx.drawImage(img, 0, 0, w, h);
+
+    // toDataURL is synchronous and returns base64 directly — easier than blob
+    const dataUrl = canvas.toDataURL('image/jpeg', quality);
+    return { dataUrl, width: w, height: h, originalWidth: img.naturalWidth, originalHeight: img.naturalHeight };
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
 async function handleFileSelection(fileList) {
   const files = Array.from(fileList);
-  const IMAGE_MAX = 2 * 1024 * 1024; // 2MB per image (base64 inflates ~33%)
+  // raw file limits — generous for images since we downscale before storing.
+  // most iphone photos are 3-8mb. anything over 20mb is probably a panorama
+  // or hdr capture and is worth rejecting up front.
+  const RAW_IMAGE_MAX = 20 * 1024 * 1024; // 20mb raw
   for (const file of files) {
     const isImage = file.type.startsWith('image/');
-    const sizeLimit = isImage ? IMAGE_MAX : MAX_FILE_SIZE;
+    const sizeLimit = isImage ? RAW_IMAGE_MAX : MAX_FILE_SIZE;
     // size check
     if (file.size > sizeLimit) {
-      showToast(`${file.name} is too big (max ${isImage ? '2mb' : '500kb'})`, true);
+      showToast(`${file.name} is too big (max ${isImage ? '20mb' : '500kb'})`, true);
       continue;
     }
-    // total size check
-    const currentTotal = attachedFiles.reduce((sum, f) => sum + f.size, 0);
-    if (currentTotal + file.size > MAX_TOTAL_FILE_SIZE * (isImage ? 4 : 1)) {
-      showToast('total attachment size exceeded', true);
-      break;
-    }
     if (isImage) {
-      // read as base64 data URL for vision API
       try {
-        const dataUrl = await new Promise((resolve, reject) => {
-          const reader = new FileReader();
-          reader.onload = () => resolve(reader.result);
-          reader.onerror = () => reject(new Error('read failed'));
-          reader.readAsDataURL(file);
-        });
+        // downscale + re-encode before storing. keeps base64 payload small
+        // enough to fit comfortably in vision-model context budgets.
+        const result = await downscaleImage(file, 1024, 0.85);
+        // estimate stored size from the data url length (base64 = ~75% of bytes)
+        const storedSize = Math.round(result.dataUrl.length * 0.75);
+        // total size check against the downscaled size, not the raw
+        const currentTotal = attachedFiles.reduce((sum, f) => sum + f.size, 0);
+        if (currentTotal + storedSize > MAX_TOTAL_FILE_SIZE * 4) {
+          showToast('total attachment size exceeded', true);
+          break;
+        }
         attachedFiles.push({
           name: file.name,
-          size: file.size,
-          content: dataUrl,
+          size: storedSize,
+          content: result.dataUrl,
           type: 'image',
-          mediaType: file.type,
+          mediaType: 'image/jpeg', // always jpeg after downscale
         });
+        // small toast if the resize was substantial — gives the user feedback
+        // about why their 8mb photo became 200kb.
+        if (file.size > storedSize * 2) {
+          const fromKb = Math.round(file.size / 1024);
+          const toKb = Math.round(storedSize / 1024);
+          showToast(`resized: ${fromKb}kb → ${toKb}kb`);
+        }
       } catch (err) {
-        showToast(`couldn't read ${file.name}`, true);
+        showToast(`couldn't process ${file.name}: ${err.message}`, true);
       }
     } else {
       // text file — existing behaviour
+      const currentTotal = attachedFiles.reduce((sum, f) => sum + f.size, 0);
+      if (currentTotal + file.size > MAX_TOTAL_FILE_SIZE) {
+        showToast('total attachment size exceeded', true);
+        break;
+      }
       if (file.type && !file.type.startsWith('text/') && !file.name.match(/\.(txt|md|csv|json|log|html|xml|yaml|yml)$/i)) {
         showToast(`${file.name} is not a supported file type`, true);
         continue;
