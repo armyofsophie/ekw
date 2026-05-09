@@ -892,6 +892,57 @@
     white-space: pre-wrap;
     word-break: break-word;
   }
+  .learned-rules-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 320px;
+    overflow-y: auto;
+  }
+  .rule-row {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px 12px;
+    background: var(--bg-elev);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+  }
+  .rule-body {
+    font-size: 13px;
+    line-height: 1.4;
+    color: var(--ink);
+  }
+  .rule-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 11px;
+    color: var(--ink-dim);
+  }
+  .rule-tier {
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: var(--bg);
+  }
+  .rule-tier-casual { color: var(--ink-dim); }
+  .rule-tier-standard { color: #8aa9d6; }
+  .rule-tier-strong { color: #d6a98a; }
+  .rule-tier-never-forget { color: #d68aaf; }
+  .rule-count { flex: 1; }
+  .rule-delete {
+    background: none;
+    border: none;
+    color: var(--ink-dim);
+    cursor: pointer;
+    padding: 2px 6px;
+    font-size: 14px;
+    line-height: 1;
+  }
+  .rule-delete:hover { color: var(--danger); }
 
   .divider {
     height: 1px;
@@ -1656,6 +1707,12 @@
       </div>
 
       <div class="field">
+        <label>learned patterns</label>
+        <div id="learnedRulesList" class="learned-rules-list"></div>
+        <div class="help">rules ekko's picked up from your corrections and preferences. happens automatically in the background. tier escalates with frequency: casual → standard → strong → never-forget. delete any that look wrong.</div>
+      </div>
+
+      <div class="field">
         <label for="maxMemInject">max retrieved memories per turn</label>
         <input type="number" id="maxMemInject" min="0" max="10" value="3" />
         <div class="help">pinned memories always load. this caps how many extra ones get retrieved each turn (semantic if openai key set, keyword otherwise).</div>
@@ -2182,6 +2239,8 @@ function createConversation(title) {
 // switch to a different conversation
 async function switchConversation(convoId) {
   if (isStreaming) return;
+  // capture the chat we're leaving so we can fire rule extraction on it
+  const leavingConvoId = activeConvoId;
   // save current conversation's messages
   if (activeConvoId) {
     localStorage.setItem('ekko_v1_chat_' + activeConvoId, JSON.stringify(messages));
@@ -2189,6 +2248,11 @@ async function switchConversation(convoId) {
   activeConvoId = convoId;
   localStorage.setItem(ACTIVE_CONVO_KEY, convoId);
   messages = loadMessagesForConvo(convoId);
+
+  // fire rule extraction on the chat we just left, in the background
+  if (leavingConvoId && leavingConvoId !== convoId) {
+    triggerSwitchRuleExtraction(leavingConvoId);
+  }
 
   // if this conversation has no messages locally but cloud is ready,
   // try to pull them. covers the case where another device wrote the
@@ -3237,6 +3301,387 @@ function renderSummaryViewer() {
   }
 }
 
+// ============================================================
+// LEARNED RULES (background pattern extraction)
+// ============================================================
+// silently watches conversations for behavioural patterns and corrections,
+// extracts them into rules via gpt-4o-mini, and auto-tiers them based on
+// frequency. fully background — sophie shouldn't have to think about it.
+//
+// flow:
+//   1. trigger fires (idle 10min, conversation switch) → extractRulesFromChat()
+//   2. gpt-4o-mini reads the recent chat tail, returns proposed rules as json
+//   3. each proposed rule's body is embedded
+//   4. for each: check semantic similarity to existing rules; if near-match
+//      (>0.85), bump frequency_count + last_seen_at; else create new
+//   5. tier escalation: 2+ → standard, 4+ → strong, 8+ → never-forget
+//   6. weekly auto-pruner: drop casual rules unseen >30d, standard >60d
+//   7. on each turn, strong+never-forget always inject; standard+casual
+//      retrieve via embeddings
+//
+// the rule writer uses the user's openai key (gpt-4o-mini specifically).
+
+const RULE_WRITER_MODEL = 'gpt-4o-mini';
+const RULE_IDLE_DEBOUNCE_MS = 10 * 60 * 1000; // 10 minutes
+const RULE_SWITCH_DEBOUNCE_MS = 5 * 60 * 1000; // 5 minutes between fires per convo
+const RULE_NEAR_MATCH_THRESHOLD = 0.85;
+const RULE_PRUNE_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000; // weekly
+const RULE_PRUNE_LAST_RUN_KEY = 'ekko_rule_prune_last_run';
+const RULE_TIER_THRESHOLDS = {
+  casual: 1,      // initial
+  standard: 2,    // 2+ occurrences
+  strong: 4,      // 4+ occurrences
+  'never-forget': 8, // 8+ occurrences
+};
+const RULE_STALE_DAYS = {
+  casual: 30,
+  standard: 60,
+  // strong + never-forget never auto-pruned
+};
+
+// in-memory cache of rules. mirrored to supabase. retrieval uses this cache
+// (resolves rule ids back to local objects after similarity rpc).
+let learnedRules = [];
+
+// debouncing trackers
+let lastRuleFireByConvo = {}; // convoId -> timestamp
+let idleTimer = null;
+
+// derive tier from frequency count + manual override
+function tierForCount(count) {
+  if (count >= RULE_TIER_THRESHOLDS['never-forget']) return 'never-forget';
+  if (count >= RULE_TIER_THRESHOLDS.strong) return 'strong';
+  if (count >= RULE_TIER_THRESHOLDS.standard) return 'standard';
+  return 'casual';
+}
+
+async function fetchLearnedRules() {
+  if (!sb || !currentUser) return;
+  try {
+    const { data, error } = await sb.from('learned_rules')
+      .select('id, body, topic, sentiment, tier, frequency_count, source_chat_id, created_at, updated_at, last_seen_at')
+      .order('updated_at', { ascending: false });
+    if (error) {
+      // table doesn't exist yet (migration not run) — silent no-op
+      return;
+    }
+    learnedRules = data || [];
+  } catch (e) {
+    console.warn('fetchLearnedRules failed', e);
+  }
+}
+
+// extract rules from the recent tail of the active conversation.
+// runs gpt-4o-mini, parses returned json array, processes each rule:
+// embed → check for near-match → upsert.
+async function extractRulesFromChat() {
+  if (!state.openaiKey) return;
+  if (!sb || !currentUser) return;
+  if (!activeConvoId) return;
+  if (!messages || messages.length < 2) return;
+
+  // debounce — don't refire the same convo within the cooldown window
+  const lastFire = lastRuleFireByConvo[activeConvoId] || 0;
+  if (Date.now() - lastFire < RULE_SWITCH_DEBOUNCE_MS) return;
+  lastRuleFireByConvo[activeConvoId] = Date.now();
+
+  // read the recent tail — last 12 messages should cover most corrections
+  const tail = messages.slice(-12);
+  const transcript = tail.map(m => {
+    const role = m.role === 'ekko' ? 'ekko' : 'sophie';
+    return `${role}: ${m.content || ''}`;
+  }).join('\n\n');
+
+  const sysPrompt = `you watch conversations between sophie and ekko (a character/companion she's built) and extract behavioural rules and preferences for ekko to learn from.
+
+return a json array of rule objects. each rule represents something that should persist beyond this conversation — usually a correction, a preference sophie has expressed, or a new fact about her or the project.
+
+extract rules ONLY for things like:
+- corrections sophie has made to ekko's behaviour, voice, or writing ("stop describing his smell every beat", "i don't like that word", "you're too soft on this")
+- new facts about sophie's life that change the picture (job, relationship, location, family, health, etc)
+- craft preferences sophie has articulated for the first time
+- pushback that should persist — if she said "actually no" or corrected him, capture what she actually wants
+- explicit requests to remember something
+
+do NOT extract rules for:
+- casual chat or jokes
+- emotional moments that aren't new
+- things already obviously implied by ekko's existing system prompt
+- one-off jokes or single-conversation moments
+- ekko's own behaviour (he's not the user — extract sophie's preferences only)
+
+return format (strict json):
+[
+  {
+    "body": "the rule itself, written as instruction. keep tight, under 30 words. lowercase to match sophie's style.",
+    "topic": "single word category — voice, descriptions, pacing, life, project, sex, scenes, characters, other",
+    "sentiment": "positive | negative | neutral"
+  }
+]
+
+if there are no rules to extract, return an empty array: []
+
+return ONLY the json array. no preamble, no explanation, no markdown fences.`;
+
+  const userPrompt = `recent conversation:\n\n${transcript}`;
+
+  let proposed = [];
+  try {
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + state.openaiKey,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: RULE_WRITER_MODEL,
+        messages: [
+          { role: 'system', content: sysPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        temperature: 0.3,
+        max_tokens: 800,
+        response_format: { type: 'json_object' },
+      }),
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      console.warn('rule writer call failed', res.status, errText.slice(0, 200));
+      return;
+    }
+    const data = await res.json();
+    const raw = data?.choices?.[0]?.message?.content?.trim();
+    if (!raw) return;
+    // gpt-4o-mini in json_object mode wraps array in object; handle both
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (e) {
+      console.warn('rule writer returned malformed json', raw.slice(0, 200));
+      return;
+    }
+    if (Array.isArray(parsed)) {
+      proposed = parsed;
+    } else if (parsed && Array.isArray(parsed.rules)) {
+      proposed = parsed.rules;
+    } else if (parsed && Array.isArray(Object.values(parsed)[0])) {
+      proposed = Object.values(parsed)[0];
+    } else {
+      return;
+    }
+  } catch (e) {
+    console.warn('rule writer network error', e);
+    return;
+  }
+
+  if (proposed.length === 0) return;
+
+  // process each proposed rule
+  for (const rule of proposed) {
+    if (!rule.body || typeof rule.body !== 'string') continue;
+    await upsertLearnedRule(rule);
+  }
+
+  // refresh local cache so the next turn has the new rules
+  await fetchLearnedRules();
+}
+
+// embed a rule body and either bump an existing near-match or insert new.
+async function upsertLearnedRule(proposed) {
+  const body = proposed.body.trim();
+  if (!body) return;
+
+  // embed the body
+  const vec = await embedText(body);
+  if (!vec) {
+    console.warn('failed to embed proposed rule', body.slice(0, 50));
+    return;
+  }
+
+  // check for near-match against existing rules
+  const session = await sb.auth.getSession();
+  if (!session.data.session) return;
+  const userId = session.data.session.user.id;
+
+  try {
+    const { data: matches, error: matchErr } = await sb.rpc('match_learned_rules', {
+      query_embedding: vec,
+      match_threshold: RULE_NEAR_MATCH_THRESHOLD,
+      match_count: 1,
+      user_id_filter: userId,
+      tier_filter: null,
+    });
+    if (matchErr) {
+      console.warn('rule near-match check failed', matchErr);
+      return;
+    }
+    if (matches && matches.length > 0) {
+      // bump existing rule
+      const existingId = matches[0].id;
+      const existing = learnedRules.find(r => r.id === existingId);
+      const newCount = (existing?.frequency_count || 1) + 1;
+      const newTier = tierForCount(newCount);
+      await sb.from('learned_rules').update({
+        frequency_count: newCount,
+        tier: newTier,
+        last_seen_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      }).eq('id', existingId);
+    } else {
+      // insert new rule
+      const tier = tierForCount(1);
+      await sb.from('learned_rules').insert({
+        user_id: userId,
+        body,
+        topic: proposed.topic || null,
+        sentiment: proposed.sentiment || 'neutral',
+        tier,
+        frequency_count: 1,
+        embedding: vec,
+        source_chat_id: activeConvoId || null,
+      });
+    }
+  } catch (e) {
+    console.warn('upsertLearnedRule failed', e);
+  }
+}
+
+// retrieve rules for the current message — strong+never-forget always
+// included; standard+casual retrieved via similarity.
+// returns array of rule bodies.
+async function getRulesForTurn(userText) {
+  if (!learnedRules || learnedRules.length === 0) return [];
+
+  // always-loaded rules
+  const alwaysLoaded = learnedRules
+    .filter(r => r.tier === 'strong' || r.tier === 'never-forget')
+    .map(r => r.body);
+
+  // semantic retrieval for standard + casual
+  let retrieved = [];
+  if (state.openaiKey && userText) {
+    try {
+      const queryVec = await embedText(userText);
+      if (queryVec && sb && currentUser) {
+        const session = await sb.auth.getSession();
+        if (session.data.session) {
+          const userId = session.data.session.user.id;
+          // standard at default threshold, casual at higher threshold
+          const { data: standardMatches } = await sb.rpc('match_learned_rules', {
+            query_embedding: queryVec,
+            match_threshold: 0.3,
+            match_count: 5,
+            user_id_filter: userId,
+            tier_filter: 'standard',
+          });
+          if (standardMatches) retrieved.push(...standardMatches.map(m => m.body));
+
+          const { data: casualMatches } = await sb.rpc('match_learned_rules', {
+            query_embedding: queryVec,
+            match_threshold: 0.5,
+            match_count: 3,
+            user_id_filter: userId,
+            tier_filter: 'casual',
+          });
+          if (casualMatches) retrieved.push(...casualMatches.map(m => m.body));
+        }
+      }
+    } catch (e) {
+      console.warn('rule retrieval failed', e);
+    }
+  }
+
+  // dedupe (a rule might appear in both lists if vector retrieval surfaces a
+  // strong/never-forget rule that's already in alwaysLoaded — defensive)
+  const seen = new Set();
+  const result = [];
+  for (const body of [...alwaysLoaded, ...retrieved]) {
+    if (!seen.has(body)) {
+      seen.add(body);
+      result.push(body);
+    }
+  }
+  return result;
+}
+
+// weekly pruner — drops stale low-tier rules.
+// runs at most once per week based on localStorage timestamp.
+async function maybePruneRules() {
+  if (!sb || !currentUser) return;
+  const lastRun = parseInt(localStorage.getItem(RULE_PRUNE_LAST_RUN_KEY) || '0');
+  if (Date.now() - lastRun < RULE_PRUNE_INTERVAL_MS) return;
+  localStorage.setItem(RULE_PRUNE_LAST_RUN_KEY, String(Date.now()));
+
+  try {
+    const cutoffCasual = new Date(Date.now() - RULE_STALE_DAYS.casual * 24 * 60 * 60 * 1000).toISOString();
+    const cutoffStandard = new Date(Date.now() - RULE_STALE_DAYS.standard * 24 * 60 * 60 * 1000).toISOString();
+    await sb.from('learned_rules').delete().eq('tier', 'casual').lt('last_seen_at', cutoffCasual);
+    await sb.from('learned_rules').delete().eq('tier', 'standard').lt('last_seen_at', cutoffStandard);
+    await fetchLearnedRules();
+  } catch (e) {
+    console.warn('rule pruning failed', e);
+  }
+}
+
+// triggers
+function scheduleIdleRuleExtraction() {
+  if (idleTimer) clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => {
+    extractRulesFromChat().catch(e => console.warn('idle rule extract failed', e));
+  }, RULE_IDLE_DEBOUNCE_MS);
+}
+
+function triggerSwitchRuleExtraction(previousConvoId) {
+  if (!previousConvoId) return;
+  // fire on the chat we're leaving, not the one we're entering
+  const savedActive = activeConvoId;
+  activeConvoId = previousConvoId;
+  extractRulesFromChat()
+    .catch(e => console.warn('switch rule extract failed', e))
+    .finally(() => { activeConvoId = savedActive; });
+}
+
+// rule list ui (settings)
+function renderLearnedRulesList() {
+  const list = $('learnedRulesList');
+  if (!list) return;
+  list.innerHTML = '';
+  if (!learnedRules || learnedRules.length === 0) {
+    list.innerHTML = '<div class="footnote">no rules yet. ekko will pick them up from your corrections automatically.</div>';
+    return;
+  }
+  // sort by tier strength then frequency
+  const tierOrder = { 'never-forget': 0, strong: 1, standard: 2, casual: 3 };
+  const sorted = [...learnedRules].sort((a, b) => {
+    const ta = tierOrder[a.tier] ?? 4;
+    const tb = tierOrder[b.tier] ?? 4;
+    if (ta !== tb) return ta - tb;
+    return (b.frequency_count || 0) - (a.frequency_count || 0);
+  });
+  for (const rule of sorted) {
+    const el = document.createElement('div');
+    el.className = 'rule-row';
+    el.innerHTML = `
+      <div class="rule-body"></div>
+      <div class="rule-meta">
+        <span class="rule-tier rule-tier-${rule.tier || 'casual'}"></span>
+        <span class="rule-count"></span>
+        <button class="rule-delete" title="delete">×</button>
+      </div>
+    `;
+    el.querySelector('.rule-body').textContent = rule.body;
+    el.querySelector('.rule-tier').textContent = rule.tier || 'casual';
+    el.querySelector('.rule-count').textContent = `seen ${rule.frequency_count || 1}×`;
+    el.querySelector('.rule-delete').addEventListener('click', async () => {
+      if (!confirm('delete this rule?')) return;
+      await sb.from('learned_rules').delete().eq('id', rule.id);
+      await fetchLearnedRules();
+      renderLearnedRulesList();
+    });
+    list.appendChild(el);
+  }
+}
+
 // returns which sampling params a given model id accepts.
 // used to filter the api payload so we don't send fields that error out
 // (grok 4.x rejects openai-style penalties with 400) or fields that get
@@ -3344,6 +3789,9 @@ async function buildSystemMessage(userText) {
   lastInjection = selected;
   updateMemIndicator();
 
+  // get learned rules — strong+never-forget always, standard+casual via similarity
+  const ruleBodies = await getRulesForTurn(userText);
+
   let sys = state.prompt || '';
 
   // inject the rolling summary first, before everything else.
@@ -3351,6 +3799,12 @@ async function buildSystemMessage(userText) {
   const currentSummary = getCurrentSummary();
   if (currentSummary && currentSummary.summary) {
     sys = `## SUMMARY OF EARLIER CHAT\n\nthe following is a summary of older messages in this conversation that have rolled out of the verbatim window. read it as continuity, not as fresh content — sophie has already seen all of this.\n\n${currentSummary.summary}\n\n---\n\n` + sys;
+  }
+
+  // learned rules — patterns ekko has picked up over time. these are
+  // sophie's preferences and corrections, expressed as instructions.
+  if (ruleBodies && ruleBodies.length > 0) {
+    sys += '\n\n---\n\n## LEARNED PATTERNS\n\nthings sophie has signalled over time. follow these:\n\n' + ruleBodies.map(b => `- ${b}`).join('\n');
   }
 
   if (selected.length > 0) {
@@ -3361,7 +3815,7 @@ async function buildSystemMessage(userText) {
   }
 
   if (state.selfWriteMemory) {
-    sys += `\n\n---\n\n## MEMORY WRITING\n\nyou can propose new memory blocks to be saved.\n\nDEFAULT BEHAVIOUR: do not propose memories. err strongly on the side of NOT proposing. most conversations should produce zero proposals. a memory you didn't propose costs nothing; a wrong proposal makes sophie tap discard, which is friction for her.\n\nONLY propose a memory when one of these is true:\n1. sophie explicitly asks you to remember something ("save this", "remember this", "add this to your memory", etc)\n2. something has happened in conversation that GENUINELY changes how you should remember her, yourselves, or the project — and you are highly confident she would want it kept. examples of things that DO qualify: a new piece she's started writing, a major change in her life she's just told you about, a craft principle she's just articulated for the first time, a correction she's made to your behaviour that should persist.\n\nthings that do NOT qualify: ordinary conversation, casual mentions, anything you only feel like remembering because it was a nice moment. nice moments are not memories. memories are facts and corrections.\n\nto propose a memory, write a block in this exact format anywhere in your reply:\n\n<memory>\ntitle: short descriptive title\npriority: pinned | high | medium | low\n---\nthe actual content here, in your voice\n</memory>\n\nrules:\n- the app catches the block and shows sophie a confirmation card. nothing saves until she confirms.\n- write the body in your own voice, not as a flat fact-list. if it's about her, you can write 'you' rather than 'sophie'.\n- pinned = always loaded, for core identity stuff. use very sparingly. almost never propose pinned.\n- the <memory> block is hidden from sophie's view in your message — she only sees it as a card. so don't reference it in your prose ('here's what i'm saving:' is unnecessary).`;
+    sys += `\n\n---\n\n## MEMORY WRITING\n\nyou can propose new memory blocks to be saved. nothing saves automatically — sophie sees a confirmation card and can accept or discard.\n\nyou SHOULD propose a memory when:\n- sophie tells you something genuinely new about her life — job, relationships, where she lives, family, health, anything that changes the picture you have of her\n- sophie corrects you on a fact about her or about the project ("no, i work at X not Y", "no, that's not what i meant by Z")\n- sophie articulates a craft preference for the first time, or pushes back on how you've been writing something — these are the corrections that should persist beyond this chat\n- something happens between you that's load-bearing — a major event, a milestone in the project, a moment she's likely to reference again weeks from now\n- sophie explicitly asks you to remember something ("save this", "remember this")\n\nyou SHOULD NOT propose a memory for:\n- normal conversation, jokes, banter\n- emotional moments that are real but not new — she's already known to be tender, or sad, or wanting; that doesn't need a memory each time\n- things that are already obviously in your existing memory or system prompt\n- nice moments just because they were nice\n- anything specific to a single conversation that won't matter next week\n\ndefault is still "don't propose". but if a real signal lands — a correction, a new fact, a craft preference — you should propose. it's worse to miss something genuinely important than to occasionally propose something sophie discards.\n\nformat (place anywhere in your reply):\n\n<memory>\ntitle: short descriptive title\npriority: pinned | high | medium | low\n---\nthe content here, in your voice\n</memory>\n\nrules:\n- write the body in your own voice — if it's about sophie, you can write 'you' rather than 'sophie'.\n- pinned = always loaded every turn. use very rarely.\n- the <memory> block is hidden from sophie's view in your prose — she only sees the proposal card. don't announce it ("here's what i'm saving:" etc).`;
   }
 
   return sys;
@@ -4095,6 +4549,7 @@ async function sendMessage() {
       // out of the verbatim window. this happens async — current turn already
       // completed, the summary is for future turns.
       updateConversationSummary().catch(e => console.warn('summary update failed', e));
+      scheduleIdleRuleExtraction();
 
       // append memory proposal cards inside the same message bubble
       if (proposals.length > 0) {
@@ -4125,6 +4580,7 @@ async function sendMessage() {
         messages.push(msgRecord);
         saveMessages();
         updateConversationSummary().catch(e => console.warn('summary update failed', e));
+        scheduleIdleRuleExtraction();
         if (proposals.length > 0 && streamEl) {
           for (const p of proposals) renderPendingMemoryCard(p, streamEl);
           // no scroll — user decides when to follow.
@@ -4474,6 +4930,7 @@ function openDrawer() {
   const saved = localStorage.getItem('ekko_active_settings_tab');
   if (saved) switchSettingsTab(saved);
   renderSummaryViewer();
+  renderLearnedRulesList();
 }
 function closeDrawer() {
   drawer.classList.remove('open');
@@ -5409,6 +5866,10 @@ async function loadFromCloud() {
 
     cloudReady = true;
     setCloudStatus('connected');
+
+    // fetch learned rules and run weekly auto-pruner in background
+    fetchLearnedRules().then(() => maybePruneRules());
+
     hydrate();
     render();
     scrollToBottom();
