@@ -853,14 +853,37 @@
     border-radius: 8px;
     font-size: 13px;
   }
-  .saved-model-id {
+  .saved-model-text {
     flex: 1;
-    font-family: ui-monospace, monospace;
-    font-size: 12px;
+    min-width: 0; /* allows ellipsis on children */
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .saved-model-label {
+    background: transparent;
+    border: none;
     color: var(--ink);
+    font-size: 13px;
+    font-family: inherit;
+    padding: 2px 4px;
+    border-radius: 4px;
+    outline: none;
+    width: 100%;
+    min-width: 0;
+  }
+  .saved-model-label:focus {
+    background: var(--bg);
+    outline: 1px solid var(--line);
+  }
+  .saved-model-id {
+    font-family: ui-monospace, monospace;
+    font-size: 11px;
+    color: var(--ink-dim);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    padding: 0 4px;
   }
   .saved-model-delete {
     background: none;
@@ -3707,24 +3730,29 @@ function modelParamSupport(modelId) {
   // grok 4.x family: rejects frequency/presence/stop/reasoning_effort
   // (confirmed in xai docs and reproduced in n8n issues).
   // does still accept repetition_penalty via openrouter normalisation.
+  // caching: automatic prefix caching — no markers needed, just keep
+  // the prompt structure stable across turns.
   if (/x-ai\/grok-4|xai\/grok-4|x-ai\/grok-4-1/.test(id)) {
-    return { repetitionPenalty: true, openaiPenalties: false };
+    return { repetitionPenalty: true, openaiPenalties: false, cacheStyle: 'auto' };
   }
 
   // anthropic: native api accepts neither penalty type. through openrouter
   // they're silently dropped — no errors, but no effect, so we omit to
-  // keep payloads clean.
+  // keep payloads clean. caching uses explicit cache_control markers in
+  // content array blocks.
   if (id.startsWith('anthropic/')) {
-    return { repetitionPenalty: false, openaiPenalties: false };
+    return { repetitionPenalty: false, openaiPenalties: false, cacheStyle: 'anthropic' };
   }
 
   // openai: accepts frequency/presence but not repetition_penalty.
+  // caching: automatic prefix caching for gpt-4o and later (no markers needed).
   if (id.startsWith('openai/')) {
-    return { repetitionPenalty: false, openaiPenalties: true };
+    return { repetitionPenalty: false, openaiPenalties: true, cacheStyle: 'auto' };
   }
 
   // default: assume openai-compatible chat-completions, honour all.
-  return { repetitionPenalty: true, openaiPenalties: true };
+  // most providers offer some form of prefix caching automatically.
+  return { repetitionPenalty: true, openaiPenalties: true, cacheStyle: 'auto' };
 }
 
 // the matching/injection logic
@@ -4298,10 +4326,31 @@ async function sendMessage() {
   const modelId = state.model === '__custom__' ? state.customModel : state.model;
   const support = modelParamSupport(modelId);
 
+  // anthropic-style explicit caching: wrap system content in an array
+  // with a cache_control marker. tells openrouter (and through it, anthropic)
+  // to cache the system prompt for reuse on subsequent turns.
+  // for grok and other auto-cache providers, plain string is fine — they'll
+  // cache the prefix automatically based on stable structure across turns.
+  let systemMessage;
+  if (support.cacheStyle === 'anthropic') {
+    systemMessage = {
+      role: 'system',
+      content: [
+        {
+          type: 'text',
+          text: systemContent,
+          cache_control: { type: 'ephemeral' },
+        },
+      ],
+    };
+  } else {
+    systemMessage = { role: 'system', content: systemContent };
+  }
+
   const payload = {
     model: modelId,
     messages: [
-      { role: 'system', content: systemContent },
+      systemMessage,
       ...recent,
     ],
     temperature: parseFloat(state.temp),
@@ -5092,21 +5141,55 @@ function renderSavedCustomModelsList() {
   for (const m of saved) {
     const row = document.createElement('div');
     row.className = 'saved-model-row';
+    // label (editable on click) — uses input element so mobile keyboard appears reliably
+    const labelInput = document.createElement('input');
+    labelInput.className = 'saved-model-label';
+    labelInput.type = 'text';
+    labelInput.value = m.label || m.id;
+    labelInput.placeholder = m.id;
+    labelInput.title = 'tap to rename';
+    labelInput.addEventListener('change', () => {
+      const newLabel = labelInput.value.trim() || m.id;
+      renameSavedCustomModel(m.id, newLabel);
+    });
+    labelInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); labelInput.blur(); }
+    });
+    // id (smaller, muted, beneath the label)
     const idEl = document.createElement('div');
     idEl.className = 'saved-model-id';
     idEl.textContent = m.id;
+    // text block: label on top, id beneath
+    const textBlock = document.createElement('div');
+    textBlock.className = 'saved-model-text';
+    textBlock.appendChild(labelInput);
+    textBlock.appendChild(idEl);
+
     const delBtn = document.createElement('button');
     delBtn.className = 'saved-model-delete';
     delBtn.textContent = '×';
     delBtn.title = 'remove';
     delBtn.addEventListener('click', () => removeSavedCustomModel(m.id));
-    row.appendChild(idEl);
+
+    row.appendChild(textBlock);
     row.appendChild(delBtn);
     list.appendChild(row);
   }
 }
 
-function addSavedCustomModel(modelId) {
+function renameSavedCustomModel(modelId, newLabel) {
+  state.savedCustomModels = state.savedCustomModels || [];
+  const m = state.savedCustomModels.find(x => x.id === modelId);
+  if (!m) return;
+  if (m.label === newLabel) return; // no change
+  m.label = newLabel;
+  saveState();
+  populateSavedCustomModels();
+  populateHeaderSwitcher();
+  syncHeaderSwitcherValue();
+}
+
+async function addSavedCustomModel(modelId) {
   const id = (modelId || '').trim();
   if (!id) {
     showToast('enter a model id first', true);
@@ -5121,6 +5204,55 @@ function addSavedCustomModel(modelId) {
     showToast('already saved', true);
     return;
   }
+
+  // validate the id against openrouter if we have an api key.
+  // sends a tiny test request with max_tokens=1; we don't care about the
+  // response, just whether the model exists. handles three outcomes:
+  //   - 200 / 4xx that isn't "model not found" → exists, save it
+  //   - 404 with "model not found" or similar → reject
+  //   - network failure / no api key → save anyway, the user can find out later
+  const btn = $('saveCustomModelBtn');
+  const wasLabel = btn?.textContent;
+  if (state.apiKey) {
+    try {
+      if (btn) { btn.disabled = true; btn.textContent = 'checking…'; }
+      const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': 'Bearer ' + state.apiKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model: id,
+          messages: [{ role: 'user', content: 'hi' }],
+          max_tokens: 1,
+        }),
+      });
+      if (btn) { btn.disabled = false; btn.textContent = wasLabel; }
+      // 404 is the clear "model not found" case
+      if (res.status === 404) {
+        showToast('model id not found on openrouter', true);
+        return;
+      }
+      // 400 with the specific text is also "not a known model"
+      if (res.status === 400) {
+        const errText = await res.text().catch(() => '');
+        if (errText.toLowerCase().includes('not a valid model') ||
+            errText.toLowerCase().includes('not found') ||
+            errText.toLowerCase().includes('unknown model')) {
+          showToast('model id not recognised by openrouter', true);
+          return;
+        }
+      }
+      // anything else (200, billing errors, rate limits, etc) — assume the
+      // model exists and we just hit some other condition. let it save.
+    } catch (e) {
+      // network error — don't block the save
+      if (btn) { btn.disabled = false; btn.textContent = wasLabel; }
+      console.warn('model validation skipped due to network error', e);
+    }
+  }
+
   state.savedCustomModels.push({ id, label: id });
   saveState();
   populateSavedCustomModels();
@@ -5585,6 +5717,30 @@ async function fetchCloudMessages(convoId) {
   });
 }
 
+// fetch messages for every conversation that isn't the active one, in the
+// background, with a small delay between fetches so we don't blast supabase.
+// silent failures — if a single convo fails, it stays empty locally and
+// switchConversation will pull it on demand later. prevents the failure mode
+// from the april 27 incident where conversations looked empty after a fresh
+// device load until the user tapped each one.
+async function backgroundFetchOtherConversations() {
+  if (!cloudReady || !currentUser) return;
+  const others = conversations.filter(c => c.id !== activeConvoId);
+  for (const c of others) {
+    try {
+      const cloudMsgs = await fetchCloudMessages(c.id);
+      if (cloudMsgs.length > 0) {
+        localStorage.setItem('ekko_v1_chat_' + c.id, JSON.stringify(cloudMsgs));
+      }
+    } catch (e) {
+      console.warn('background fetch failed for convo', c.id, e);
+      // keep going — one failure shouldn't block the rest
+    }
+    // small delay so we don't hammer supabase
+    await new Promise(r => setTimeout(r, 250));
+  }
+}
+
 // cheap freshness check — just the count, no payload fetch.
 async function fetchCloudMessageCount() {
   if (!activeConvoId) return 0;
@@ -5862,12 +6018,21 @@ async function loadFromCloud() {
         activeConvoId = conversations[0].id;
         localStorage.setItem(ACTIVE_CONVO_KEY, activeConvoId);
       }
-      // fetch messages for the active conversation
+      // fetch messages for the active conversation synchronously so the user
+      // sees their current chat immediately on load.
       const cloudMessages = await fetchCloudMessages();
       messages = cloudMessages;
       saveMessages();
       // also fetch the rolling summary for this conversation
       await fetchSummaryForConversation(activeConvoId);
+
+      // fetch messages for every OTHER conversation in the background so the
+      // drawer doesn't appear empty for them. this prevents the failure mode
+      // where switching to another conversation shows it as empty until you
+      // tap into it. silent failures — if any single convo fails to fetch,
+      // it just won't have local messages and switchConversation will pull
+      // them on demand later.
+      backgroundFetchOtherConversations();
     }
 
     // memories: cloud is the source of truth
