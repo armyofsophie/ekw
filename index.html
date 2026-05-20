@@ -3225,7 +3225,7 @@ what NOT to do:
 - don't add anything that wasn't actually in the messages.
 - don't repeat the existing summary verbatim — merge new info into it.
 
-format: prose paragraphs, lowercase to match sophie's style. compact but not lossy. 200-600 words depending on density. use 'sophie' and 'ekko' explicitly so the model is never confused about who said what.`;
+format: prose paragraphs, lowercase to match sophie's style. compact but not lossy. 200-600 words depending on density. use 'sophie' and 'ekko' explicitly so the model is never confused about who said what. do NOT use first-person ("i", "me") or second-person ("you") to refer to either of them — only their names. this is essential because ekko's system prompt is written in first person, and the summary will be read by a model already inhabiting him.`;
 
   const userPrompt = current.summary
     ? `CURRENT SUMMARY:\n${current.summary}\n\nNEW MESSAGES TO MERGE IN:\n${transcript}\n\nReturn an updated full summary that incorporates the new messages.`
@@ -3410,10 +3410,22 @@ do NOT extract rules for:
 - one-off jokes or single-conversation moments
 - ekko's own behaviour (he's not the user — extract sophie's preferences only)
 
+PERSPECTIVE — important:
+the rule will be loaded into ekko's system prompt for future conversations. so write each rule as an instruction or fact, in the voice a system prompt would use.
+
+- refer to the user by name as "sophie", NOT as "me", "i", "her", or "the user". this is essential — the rule will be read by a model already inhabiting ekko, so first-person ambiguity ("don't call me she" vs "don't call sophie she") will misfire.
+- write rules as direct instruction or fact. examples:
+  - GOOD: "don't refer to sophie as she — she prefers you/her name"
+  - BAD: "don't refer to me as she"
+  - GOOD: "sophie works at a cafe in oxford, starting may 11"
+  - BAD: "i'm working at a cafe now"
+  - GOOD: "sophie prefers shorter sentences in scenes — under 25 words ideally"
+  - BAD: "shorter sentences please"
+
 return format (strict json):
 [
   {
-    "body": "the rule itself, written as instruction. keep tight, under 30 words. lowercase to match sophie's style.",
+    "body": "the rule itself, in the perspective rules above. keep tight, under 30 words. lowercase to match sophie's style.",
     "topic": "single word category — voice, descriptions, pacing, life, project, sex, scenes, characters, other",
     "sentiment": "positive | negative | neutral"
   }
