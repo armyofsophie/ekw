@@ -1711,6 +1711,12 @@
     <div class="tab-pane" data-pane="memory">
 
       <div class="field">
+        <label for="sophieContext">about sophie (loaded every turn, before everything else)</label>
+        <textarea id="sophieContext" rows="5" placeholder="the user is sophie. she is the 'her' in everything above..."></textarea>
+        <div class="help">short identity anchor — tells the model who it's actually talking to. loaded before the system prompt so the model meets sophie before it meets ekko. keep it brief.</div>
+      </div>
+
+      <div class="field">
         <label for="ctxBudget">context window (tokens of recent messages)</label>
         <input type="number" id="ctxBudget" min="2000" max="50000" step="1000" value="12000" />
         <div class="help">budget for recent messages sent verbatim each turn. older messages get compressed into a rolling summary. ~4 chars per token, so 12000 tokens ≈ 48000 characters of conversation. higher = more verbatim history, more cost. defaults to 12000.</div>
@@ -2165,6 +2171,7 @@ const defaults = {
   prompt: '',
   ctxLength: 16, // legacy; auto-migrates to ctxBudget on first save
   ctxBudget: 12000, // tokens of recent messages sent verbatim per turn
+  sophieContext: '', // identity anchor loaded before everything else
   maxMemInject: 3,
   typingSpeed: 40,
   typingPauses: true,
@@ -2392,6 +2399,7 @@ function hydrate() {
   $('presencePenalty').value = state.presencePenalty ?? 0;
   $('prompt').value = state.prompt;
   $('ctxBudget').value = state.ctxBudget ?? 12000;
+  $('sophieContext').value = state.sophieContext || '';
   $('maxMemInject').value = state.maxMemInject;
   $('typingSpeed').value = state.typingSpeed;
   $('typingPauses').value = String(state.typingPauses);
@@ -3832,14 +3840,22 @@ async function buildSystemMessage(userText) {
   // get learned rules — strong+never-forget always, standard+casual via similarity
   const ruleBodies = await getRulesForTurn(userText);
 
-  let sys = state.prompt || '';
+  let sys = '';
 
-  // inject the rolling summary first, before everything else.
-  // this gives the model continuity past the verbatim window.
+  // sophie context — identity anchor, loaded first so the model
+  // encounters "who am i talking to" before anything else.
+  if (state.sophieContext) {
+    sys += state.sophieContext + '\n\n---\n\n';
+  }
+
+  // inject the rolling summary, before the sp but after sophie context.
   const currentSummary = getCurrentSummary();
   if (currentSummary && currentSummary.summary) {
-    sys = `## SUMMARY OF EARLIER CHAT\n\nthe following is a summary of older messages in this conversation that have rolled out of the verbatim window. read it as continuity, not as fresh content — sophie has already seen all of this.\n\n${currentSummary.summary}\n\n---\n\n` + sys;
+    sys += `## SUMMARY OF EARLIER CHAT\n\nthe following is a summary of older messages in this conversation that have rolled out of the verbatim window. read it as continuity, not as fresh content — sophie has already seen all of this.\n\n${currentSummary.summary}\n\n---\n\n`;
   }
+
+  // the system prompt itself — ekko's voice, behaviour, scene rules.
+  sys += state.prompt || '';
 
   // learned rules — patterns ekko has picked up over time. these are
   // sophie's preferences and corrections, expressed as instructions.
@@ -4218,12 +4234,6 @@ async function sendMessage() {
     openDrawer();
     return;
   }
-  if (!state.prompt) {
-    showToast('add ekko\'s system prompt in settings', true);
-    openDrawer();
-    return;
-  }
-
   // snapshot the attachments before clearing the composer
   const attachmentsForMessage = attachedFiles.map(f => ({
     name: f.name,
@@ -5379,6 +5389,7 @@ $('saveBtn').addEventListener('click', () => {
   state.prompt = $('prompt').value;
   state.ctxBudget = parseInt($('ctxBudget').value) || 12000;
   if (state.ctxBudget < 2000) state.ctxBudget = 2000;
+  state.sophieContext = $('sophieContext').value.trim();
   state.maxMemInject = parseInt($('maxMemInject').value);
   if (isNaN(state.maxMemInject) || state.maxMemInject < 0) state.maxMemInject = 3;
   state.typingSpeed = parseInt($('typingSpeed').value);
@@ -6105,7 +6116,7 @@ async function onSignedIn(user) {
   $('cloudStatus').textContent = 'loading…';
   await loadFromCloud();
   // if no key/prompt yet, nudge drawer open
-  if (!state.apiKey || !state.prompt) {
+  if (!state.apiKey) {
     setTimeout(openDrawer, 400);
   }
 }
