@@ -4216,6 +4216,15 @@ async function buildSystemMessage(userText) {
     const sceneKey = buildSceneKey();
     const exemplars = await retrieveVoiceExemplars(sceneKey, state.voiceExemplarCount || 6);
     if (exemplars.length > 0) {
+      // dev visibility: log what got pulled this turn, with source + similarity
+      console.log('%c🎭 voice exemplars pulled this turn:', 'color:#a78bfa;font-weight:bold', exemplars.length);
+      exemplars.forEach((e, i) => {
+        console.log(
+          `%c[${i + 1}] ${(e.similarity * 100).toFixed(1)}% · ${e.source || 'unknown'}`,
+          'color:#a78bfa',
+          '\n' + e.text.slice(0, 300) + (e.text.length > 300 ? '…' : '')
+        );
+      });
       const body = exemplars.map((e, i) => `[example ${i + 1}]\n${e.text}`).join('\n\n');
       sys += `\n\n---\n\n## HOW YOU SOUND (voice reference only)\n\nthe passages below are examples of your own voice from PAST scenes and conversations. they are here ONLY so you can match your established register, rhythm, and texture. they are NOT part of the current conversation. nothing in them is happening now. do not refer to them, continue them, or treat their events as real or recent. absorb the *sound*, then write the present moment in that voice.\n\n${body}`;
     }
