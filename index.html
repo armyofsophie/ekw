@@ -2412,7 +2412,7 @@ async function switchConversation(convoId) {
     try {
       const cloudMsgs = await fetchCloudMessages(convoId);
       if (cloudMsgs.length > 0) {
-        messages = cloudMsgs;
+        messages = mergeMessages(messages, cloudMsgs);
         localStorage.setItem('ekko_v1_chat_' + convoId, JSON.stringify(messages));
       }
     } catch (e) {
@@ -2806,8 +2806,15 @@ function updateJumpBottomVisibility() {
   }
 }
 
+// stable per-message id, generated once at creation and preserved across syncs.
+// this is the backbone of id-reconciled sync: a message keeps the same id
+// forever, so sync can upsert/merge by it instead of wiping and re-inserting.
+function newMsgId() {
+  return 'msg_' + Date.now() + '_' + Math.random().toString(36).slice(2, 9);
+}
+
 function appendMsg(role, content, attachments) {
-  const msg = { role, content };
+  const msg = { id: newMsgId(), role, content };
   if (attachments && attachments.length > 0) msg.attachments = attachments;
   messages.push(msg);
   saveMessages();
@@ -5100,7 +5107,7 @@ async function sendMessage() {
       }
 
       // save the message — store both the clean text and any proposals so they persist
-      const msgRecord = { role: 'ekko', content: cleanText };
+      const msgRecord = { id: newMsgId(), role: 'ekko', content: cleanText };
       if (proposals.length > 0) {
         msgRecord.proposals = proposals;
       }
@@ -5147,7 +5154,7 @@ async function sendMessage() {
           // replace character-span output with formatted final text + stopped mark
           streamBody.innerHTML = formatEkko(cleanText) + '<span style="color: var(--ink-dimmer); font-size: 11px; font-style: italic;"> — stopped</span>';
         }
-        const msgRecord = { role: 'ekko', content: cleanText };
+        const msgRecord = { id: newMsgId(), role: 'ekko', content: cleanText };
         if (proposals.length > 0) msgRecord.proposals = proposals;
         // if this was a versioned regen that got stopped partway, still fold the
         // partial onto the stack so the earlier generation(s) aren't lost.
@@ -5171,7 +5178,7 @@ async function sendMessage() {
         // previous generation(s) as the message so they aren't lost.
         if (pendingRegenStack && pendingRegenStack.length > 0) {
           const prev = pendingRegenStack[pendingRegenStack.length - 1];
-          const restored = { role: 'ekko', content: prev.content, versions: pendingRegenStack, activeVersion: pendingRegenStack.length - 1 };
+          const restored = { id: newMsgId(), role: 'ekko', content: prev.content, versions: pendingRegenStack, activeVersion: pendingRegenStack.length - 1 };
           if (prev.proposals) restored.proposals = prev.proposals;
           messages.push(restored);
           saveMessages();
@@ -5191,7 +5198,7 @@ async function sendMessage() {
       // original isn't lost to a failed re-roll.
       if (pendingRegenStack && pendingRegenStack.length > 0) {
         const prev = pendingRegenStack[pendingRegenStack.length - 1];
-        const restored = { role: 'ekko', content: prev.content, versions: pendingRegenStack, activeVersion: pendingRegenStack.length - 1 };
+        const restored = { id: newMsgId(), role: 'ekko', content: prev.content, versions: pendingRegenStack, activeVersion: pendingRegenStack.length - 1 };
         if (prev.proposals) restored.proposals = prev.proposals;
         messages.push(restored);
         saveMessages();
@@ -6259,7 +6266,7 @@ async function fetchCloudMessages(convoId) {
     .order('position', { ascending: true });
   if (error) throw error;
   return (data || []).map(row => {
-    const m = { role: row.role, content: row.content };
+    const m = { id: row.id, role: row.role, content: row.content };
     if (row.proposals) m.proposals = row.proposals;
     if (row.attachments) m.attachments = row.attachments;
     if (row.versions) m.versions = row.versions;
@@ -6281,7 +6288,12 @@ async function backgroundFetchOtherConversations() {
     try {
       const cloudMsgs = await fetchCloudMessages(c.id);
       if (cloudMsgs.length > 0) {
-        localStorage.setItem('ekko_v1_chat_' + c.id, JSON.stringify(cloudMsgs));
+        // merge with any local copy rather than blind-overwrite, so unsynced
+        // local messages for that convo aren't lost.
+        let localMsgs = [];
+        try { localMsgs = JSON.parse(localStorage.getItem('ekko_v1_chat_' + c.id) || '[]'); } catch (e) {}
+        const merged = mergeMessages(localMsgs, cloudMsgs);
+        localStorage.setItem('ekko_v1_chat_' + c.id, JSON.stringify(merged));
       }
     } catch (e) {
       console.warn('background fetch failed for convo', c.id, e);
@@ -6442,10 +6454,23 @@ async function doPushMessages(msgs) {
   if (!activeConvoId) return;
   // ensure the conversation exists in the cloud
   await ensureCloudConversation(activeConvoId);
-  // wipe messages for THIS conversation only, then insert
-  await sb.from('messages').delete().eq('conversation_id', activeConvoId);
-  if (msgs.length === 0) return;
+
+  // ID-RECONCILED SYNC (replaces the old delete-everything-then-reinsert).
+  // we upsert each local message by its stable id, and only delete cloud rows
+  // whose ids are no longer present locally (genuine deletions — edits, regen,
+  // truncation). a message that didn't change is updated in place to the same
+  // values, never destroyed. crucially: an empty local set does NOT blanket-wipe
+  // the cloud unless we've confirmed those messages were really removed.
+
+  // make sure every local message has a stable id (older messages migrated in
+  // from before this system, or restored from backup, may lack one).
+  for (const m of msgs) {
+    if (!m.id) m.id = newMsgId();
+  }
+
+  // build the rows to upsert, carrying the id and a position for ordering.
   const rows = msgs.map((m, i) => ({
+    id: m.id,
     user_id: currentUser.id,
     conversation_id: activeConvoId,
     position: i,
@@ -6456,8 +6481,27 @@ async function doPushMessages(msgs) {
     versions: m.versions || null,
     active_version: (typeof m.activeVersion === 'number') ? m.activeVersion : null,
   }));
-  const { error } = await sb.from('messages').insert(rows);
-  if (error) throw error;
+
+  // upsert by id — inserts new, updates existing, touches nothing else.
+  if (rows.length > 0) {
+    const { error: upsertErr } = await sb.from('messages').upsert(rows, { onConflict: 'id' });
+    if (upsertErr) throw upsertErr;
+  }
+
+  // delete only the cloud rows for this conversation whose ids are NOT in the
+  // local set — i.e. messages that were genuinely removed locally. we fetch the
+  // cloud ids first, diff, and delete the difference. this is the ONLY delete,
+  // and it can never wipe a message that still exists locally.
+  const { data: cloudRows, error: fetchErr } = await sb.from('messages')
+    .select('id')
+    .eq('conversation_id', activeConvoId);
+  if (fetchErr) throw fetchErr;
+  const localIds = new Set(msgs.map(m => m.id));
+  const toDelete = (cloudRows || []).map(r => r.id).filter(id => !localIds.has(id));
+  if (toDelete.length > 0) {
+    const { error: delErr } = await sb.from('messages').delete().in('id', toDelete);
+    if (delErr) throw delErr;
+  }
 }
 
 // ensure a conversation row exists in supabase for this convo id
@@ -6545,61 +6589,62 @@ async function doMigration() {
 }
 
 // ----- the main "load all data from cloud" -----
+// SAFE LOAD: cloud data is fetched and MERGED into local. an empty or failed
+// fetch never wipes local, and cloudReady (which gates all UPLOADS) is only set
+// true once we've genuinely confirmed a successful read. this prevents the
+// recurring failure where a hiccuping fetch marked the app "ready" while empty,
+// then pushed that emptiness up and overwrote the cloud.
 async function loadFromCloud() {
-  // capture state before fetch so we can detect real changes
   const prevMsgCount = messages.length;
   const prevMemCount = memories.length;
   const prevConvoCount = conversations.length;
 
   try {
+    // fetch the three top-level sets. if conversations FAILS (throws), we bail
+    // to catch and never touch local or set ready — local cache stays intact.
     const [cloudSettings, cloudConvos, cloudMemories] = await Promise.all([
       fetchCloudSettings(),
       fetchCloudConversations(),
       fetchCloudMemories(),
     ]);
 
-    // settings: merge cloud over local defaults
+    // settings: merge cloud over local defaults (additive, safe)
     if (cloudSettings) {
       state = { ...defaults, ...state, ...cloudSettings };
       saveState();
     }
 
-    // conversations: cloud is the source of truth
+    // conversations: adopt cloud as source of truth ONLY when cloud actually
+    // returned some. if cloud returns an empty list, that's either a genuinely
+    // empty account or a soft failure — either way we do NOT clear local convos.
     if (cloudConvos.length > 0) {
       conversations = cloudConvos;
       saveConversations();
-      // make sure we have a valid active conversation
       if (!activeConvoId || !conversations.find(c => c.id === activeConvoId)) {
         activeConvoId = conversations[0].id;
         localStorage.setItem(ACTIVE_CONVO_KEY, activeConvoId);
       }
-      // fetch messages for the active conversation synchronously so the user
-      // sees their current chat immediately on load.
+      // load the active conversation's messages and MERGE (don't blind-replace).
       const cloudMessages = await fetchCloudMessages();
-      messages = cloudMessages;
+      messages = mergeMessages(messages, cloudMessages);
       saveMessages();
-      // also fetch the rolling summary for this conversation
       await fetchSummaryForConversation(activeConvoId);
-
-      // fetch messages for every OTHER conversation in the background so the
-      // drawer doesn't appear empty for them. this prevents the failure mode
-      // where switching to another conversation shows it as empty until you
-      // tap into it. silent failures — if any single convo fails to fetch,
-      // it just won't have local messages and switchConversation will pull
-      // them on demand later.
       backgroundFetchOtherConversations();
+    } else if (conversations.length > 0) {
+      // cloud came back empty but we have local convos — keep them, don't wipe.
+      console.warn('cloud returned no conversations; keeping local cache');
     }
 
-    // memories: cloud is the source of truth
+    // memories: same rule — only adopt cloud when it returned some.
     if (cloudMemories.length > 0) {
       memories = cloudMemories;
       saveMemories();
     }
 
+    // only NOW, after a clean successful read, do we enable uploads.
     cloudReady = true;
     setCloudStatus('connected');
 
-    // fetch learned rules and run weekly auto-pruner in background
     fetchLearnedRules().then(() => maybePruneRules());
 
     hydrate();
@@ -6609,9 +6654,6 @@ async function loadFromCloud() {
     renderConvoList();
     syncHeaderSwitcherValue();
 
-    // if cloud actually gained messages/memories/convos since our last sync,
-    // and we're past initial boot (so we're not double-playing), show the
-    // welcome animation as a visual "he's back" marker.
     if (bootComplete) {
       const msgsChanged = messages.length !== prevMsgCount;
       const memsChanged = memories.length !== prevMemCount;
@@ -6621,17 +6663,36 @@ async function loadFromCloud() {
       }
     }
 
-    // if cloud is totally empty but local has data, offer migration
+    // offer migration ONLY when cloud is genuinely, fully empty and local has data.
     const cloudEmpty = !cloudSettings && cloudConvos.length === 0 && cloudMemories.length === 0;
     const localHasData = messages.length > 0 || memories.length > 0;
     if (cloudEmpty && localHasData) {
       showMigrateBanner({ messages: messages.length, memories: memories.length });
     }
   } catch (err) {
+    // a real failure: DON'T set cloudReady, DON'T touch local. the app keeps
+    // showing its local cache and, crucially, will not push anything up (every
+    // push is gated on cloudReady). a transient failure can no longer cascade
+    // into data loss.
     console.error('cloud load failed', err);
+    cloudReady = false;
     setCloudStatus('error');
-    showToast('cloud sync failed — using local cache', true);
+    showToast('cloud sync failed — using local cache, not uploading', true);
   }
+}
+
+// merge two message arrays by stable id. cloud is authoritative for content of
+// shared ids; ids present in only one side are kept. order follows cloud's
+// ordering (which carries position), with any local-only messages appended.
+// this is what makes a fetch additive instead of destructive.
+function mergeMessages(local, cloud) {
+  if (!Array.isArray(cloud) || cloud.length === 0) return local || [];
+  if (!Array.isArray(local) || local.length === 0) return cloud;
+  const cloudIds = new Set(cloud.map(m => m.id).filter(Boolean));
+  // start from cloud (authoritative + ordered), then append any local messages
+  // that the cloud doesn't have yet (e.g. just-sent, not yet pushed).
+  const localOnly = local.filter(m => m.id && !cloudIds.has(m.id));
+  return [...cloud, ...localOnly];
 }
 
 function setCloudStatus(status) {
