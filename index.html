@@ -350,6 +350,79 @@
     stroke-width: 1.8;
   }
 
+  /* version switcher (< n/m >) shown on regenerated messages */
+  .version-nav {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin-left: 2px;
+  }
+  .version-arrow {
+    background: none;
+    border: none;
+    color: var(--ink-dim);
+    cursor: pointer;
+    padding: 2px 6px;
+    border-radius: 6px;
+    font-family: inherit;
+    font-size: 15px;
+    line-height: 1;
+    transition: color 0.15s, background 0.15s;
+  }
+  .version-arrow:hover:not(:disabled) {
+    color: var(--ink);
+    background: var(--bg-elev);
+  }
+  .version-arrow:disabled {
+    opacity: 0.3;
+    cursor: default;
+  }
+  .version-count {
+    color: var(--ink-dim);
+    font-size: 11px;
+    min-width: 26px;
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* inline editor for ekko messages */
+  .inline-edit {
+    width: 100%;
+    box-sizing: border-box;
+    background: var(--bg-elev);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    color: var(--ink);
+    font-family: inherit;
+    font-size: inherit;
+    line-height: 1.5;
+    padding: 10px 12px;
+    resize: none;
+    overflow: hidden;
+  }
+  .inline-edit:focus {
+    outline: none;
+    border-color: var(--ink-dim);
+  }
+  .inline-edit-controls {
+    display: flex;
+    gap: 8px;
+    margin-top: 6px;
+  }
+  .inline-edit-save, .inline-edit-cancel {
+    background: none;
+    border: 1px solid var(--line);
+    color: var(--ink-dim);
+    cursor: pointer;
+    padding: 5px 14px;
+    border-radius: 6px;
+    font-family: inherit;
+    font-size: 12px;
+    transition: color 0.15s, background 0.15s, border-color 0.15s;
+  }
+  .inline-edit-save:hover { color: var(--ink); border-color: var(--ink-dim); background: var(--bg-elev); }
+  .inline-edit-cancel:hover { color: var(--ink); background: var(--bg-elev); }
+
   .typing {
     display: flex;
     gap: 4px;
@@ -1444,6 +1517,37 @@
     gap: 8px;
     margin-top: 4px;
   }
+  /* append / overwrite diff display */
+  .pending-mem-diff {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin: 4px 0 2px;
+    font-size: 13px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+  }
+  .diff-label {
+    font-size: 11px;
+    color: var(--ink-dim);
+    text-transform: lowercase;
+    margin-top: 4px;
+  }
+  .diff-existing, .diff-old {
+    color: var(--ink-dim);
+    border-left: 2px solid var(--line);
+    padding-left: 12px;
+  }
+  .diff-old {
+    text-decoration: line-through;
+    text-decoration-color: var(--ink-dimmer);
+    opacity: 0.75;
+  }
+  .diff-add, .diff-new {
+    color: var(--ink);
+    border-left: 2px solid var(--accent, #6ea8fe);
+    padding-left: 12px;
+  }
   .pending-mem-actions .btn {
     padding: 8px 14px;
     font-size: 12px;
@@ -1754,6 +1858,21 @@
           <option value="true">on</option>
         </select>
         <div class="help">when on, ekko can propose new memory blocks in chat. nothing gets saved without your confirmation.</div>
+      </div>
+
+      <div class="field">
+        <label for="voiceExemplars">voice reference</label>
+        <select id="voiceExemplars">
+          <option value="false">off</option>
+          <option value="true">on</option>
+        </select>
+        <div class="help">when on, each turn pulls passages of past ekko prose tonally similar to the current scene, injected as voice reference (not conversation). needs the voice corpus embedded in supabase.</div>
+      </div>
+
+      <div class="field">
+        <label for="voiceExemplarCount">voice passages per turn</label>
+        <input type="number" id="voiceExemplarCount" min="1" max="12" value="6" />
+        <div class="help">how many past-prose examples to inject. more = stronger voice anchor, but more tokens per turn.</div>
       </div>
 
       <div class="mem-section">
@@ -2176,6 +2295,8 @@ const defaults = {
   typingSpeed: 40,
   typingPauses: true,
   selfWriteMemory: false,
+  voiceExemplars: false,      // retrieve past 4o-ekko prose as voice reference
+  voiceExemplarCount: 6,      // how many passages to inject per turn
 };
 
 let state = loadState();
@@ -2404,6 +2525,8 @@ function hydrate() {
   $('typingSpeed').value = state.typingSpeed;
   $('typingPauses').value = String(state.typingPauses);
   $('selfWriteMemory').value = String(state.selfWriteMemory);
+  $('voiceExemplars').value = String(state.voiceExemplars);
+  $('voiceExemplarCount').value = state.voiceExemplarCount;
   populateSavedCustomModels();
   renderSavedCustomModelsList();
 }
@@ -2451,6 +2574,10 @@ function attachEkkoActions(el, idx) {
   const row = document.createElement('div');
   row.className = 'msg-actions';
   row.innerHTML = `
+    <button class="msg-action-btn" data-action="edit" title="edit">
+      <svg viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+      edit
+    </button>
     <button class="msg-action-btn" data-action="regenerate" title="regenerate">
       <svg viewBox="0 0 24 24"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
       regenerate
@@ -2460,9 +2587,80 @@ function attachEkkoActions(el, idx) {
       copy
     </button>
   `;
+  row.querySelector('[data-action="edit"]').addEventListener('click', () => editEkkoMessageAt(idx));
   row.querySelector('[data-action="regenerate"]').addEventListener('click', () => regenerateEkkoMessageAt(idx));
   row.querySelector('[data-action="copy"]').addEventListener('click', e => copyMessageContent(idx, e.currentTarget));
+
+  // version switcher — only shown when this message has more than one generation
+  const m = messages[idx];
+  if (m && Array.isArray(m.versions) && m.versions.length > 1) {
+    const active = (typeof m.activeVersion === 'number') ? m.activeVersion : m.versions.length - 1;
+    const nav = document.createElement('div');
+    nav.className = 'version-nav';
+    nav.innerHTML = `
+      <button class="version-arrow" data-dir="prev" title="previous version" ${active === 0 ? 'disabled' : ''}>‹</button>
+      <span class="version-count">${active + 1}/${m.versions.length}</span>
+      <button class="version-arrow" data-dir="next" title="next version" ${active === m.versions.length - 1 ? 'disabled' : ''}>›</button>
+    `;
+    nav.querySelector('[data-dir="prev"]').addEventListener('click', () => setActiveVersion(idx, active - 1));
+    nav.querySelector('[data-dir="next"]').addEventListener('click', () => setActiveVersion(idx, active + 1));
+    row.appendChild(nav);
+  }
+
   el.appendChild(row);
+}
+
+// edit an ekko message in place — turns the bubble into a textarea so you can
+// fix it (e.g. lop off a garbled tail) without regenerating. saves + syncs.
+// editing writes into the currently-active version so swiping stays consistent.
+function editEkkoMessageAt(idx) {
+  if (isStreaming) { showToast('wait for the message to finish', true); return; }
+  const m = messages[idx];
+  if (!m || m.role !== 'ekko') { showToast('nothing to edit'); return; }
+
+  const el = chatEl.children[idx];
+  if (!el) return;
+  const body = el.querySelector('.body');
+  if (!body) return;
+
+  // build an inline editor
+  const ta = document.createElement('textarea');
+  ta.className = 'inline-edit';
+  ta.value = m.content || '';
+  const controls = document.createElement('div');
+  controls.className = 'inline-edit-controls';
+  controls.innerHTML = `
+    <button class="inline-edit-save">save</button>
+    <button class="inline-edit-cancel">cancel</button>
+  `;
+  body.replaceWith(ta);
+  el.insertBefore(controls, el.querySelector('.msg-actions'));
+  ta.focus();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+  // auto-size to content
+  const grow = () => { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; };
+  grow();
+  ta.addEventListener('input', grow);
+
+  const finish = (saved) => {
+    if (saved) {
+      const newText = ta.value;
+      m.content = newText;
+      // keep the active version in sync if this message has a stack
+      if (Array.isArray(m.versions) && typeof m.activeVersion === 'number' && m.versions[m.activeVersion]) {
+        m.versions[m.activeVersion].content = newText;
+      }
+      saveMessages();
+    }
+    render();
+  };
+  controls.querySelector('.inline-edit-save').addEventListener('click', () => finish(true));
+  controls.querySelector('.inline-edit-cancel').addEventListener('click', () => finish(false));
+  // cmd/ctrl+enter saves, esc cancels
+  ta.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); finish(true); }
+    if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+  });
 }
 
 async function copyMessageContent(idx, btn) {
@@ -2653,37 +2851,73 @@ function showToast(msg, isError = false) {
 // re-populate the input with its content so you can revise and re-send
 function editUserMessageAt(idx) {
   if (isStreaming) { showToast('wait for the message to finish', true); return; }
-  const prev = messages[idx];
-  if (!prev || prev.role !== 'user') { showToast('nothing to edit'); return; }
-  // confirm if there are messages after this one that will be lost
-  const willLose = messages.length - idx - 1;
-  if (willLose > 0) {
-    const ok = confirm(`editing this will delete the ${willLose} message${willLose === 1 ? '' : 's'} that came after. continue?`);
-    if (!ok) return;
-  }
-  // restore any attachments back to the composer too
-  if (Array.isArray(prev.attachments) && prev.attachments.length > 0) {
-    attachedFiles = prev.attachments.map(a => ({
-      name: a.name,
-      size: a.size,
-      content: a.content,
-    }));
-    renderAttachedFiles();
-  }
-  // truncate the conversation back to before this message
-  messages = messages.slice(0, idx);
-  markIntentionalTruncation();
-  saveMessages();
-  render();
-  // populate the input with just the typed text
-  inputEl.value = prev.content || '';
-  autoResize();
-  inputEl.focus();
-  // move cursor to end
-  inputEl.setSelectionRange(inputEl.value.length, inputEl.value.length);
+  const m = messages[idx];
+  if (!m || m.role !== 'user') { showToast('nothing to edit'); return; }
+
+  const el = chatEl.children[idx];
+  if (!el) return;
+  const body = el.querySelector('.body');
+  if (!body) return;
+
+  // turn the bubble into an editor WITHOUT touching anything else in the
+  // conversation. his reply below stays put. nothing is destroyed unless and
+  // until you hit send.
+  const ta = document.createElement('textarea');
+  ta.className = 'inline-edit';
+  ta.value = m.content || '';
+  const controls = document.createElement('div');
+  controls.className = 'inline-edit-controls';
+  controls.innerHTML = `
+    <button class="inline-edit-send">send</button>
+    <button class="inline-edit-cancel">cancel</button>
+  `;
+  body.replaceWith(ta);
+  el.insertBefore(controls, el.querySelector('.msg-actions'));
+  ta.focus();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+  const grow = () => { ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; };
+  grow();
+  ta.addEventListener('input', grow);
+
+  // cancel — snap everything back exactly as it was. as if you never tapped.
+  const cancel = () => { render(); };
+
+  // send — NOW do the destructive resend: drop this message and everything
+  // after it, restore attachments to the composer, and regenerate from the new
+  // wording. this is the only path that deletes his reply.
+  const send = () => {
+    const newText = ta.value.trim();
+    if (!newText) { showToast('message is empty', true); return; }
+    if (Array.isArray(m.attachments) && m.attachments.length > 0) {
+      attachedFiles = m.attachments.map(a => ({ name: a.name, size: a.size, content: a.content }));
+      renderAttachedFiles();
+    }
+    messages = messages.slice(0, idx);
+    markIntentionalTruncation();
+    saveMessages();
+    render();
+    inputEl.value = newText;
+    autoResize();
+    sendMessage();
+  };
+
+  controls.querySelector('.inline-edit-send').addEventListener('click', send);
+  controls.querySelector('.inline-edit-cancel').addEventListener('click', cancel);
+  ta.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); send(); }
+    if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+  });
 }
 
-// regenerate any ekko message: drop it (and everything after), re-send the user message that produced it
+// regenerate any ekko message.
+//   - LAST message: keeps the old generation. the new one is stacked on as a
+//     version, and you can swipe between them with the < n/m > arrows. nothing
+//     is lost. this is the common case (catching a bad/garbled tail right after
+//     it generates).
+//   - OLDER message: keeps the original behaviour — drops it and everything
+//     after, then re-sends. if you're going back that far, the following
+//     messages are already spoilt, so versioning them isn't worth the
+//     complexity.
 function regenerateEkkoMessageAt(idx) {
   if (isStreaming) { showToast('wait for the message to finish', true); return; }
   const target = messages[idx];
@@ -2694,13 +2928,10 @@ function regenerateEkkoMessageAt(idx) {
     if (messages[i].role === 'user') { userIdx = i; break; }
   }
   if (userIdx === -1) { showToast('no user message to regenerate from', true); return; }
-  // confirm if there are messages after this one that will be lost
-  const willLose = messages.length - idx - 1;
-  if (willLose > 0) {
-    const ok = confirm(`regenerating this will delete the ${willLose} message${willLose === 1 ? '' : 's'} that came after. continue?`);
-    if (!ok) return;
-  }
+
+  const isLast = idx === messages.length - 1;
   const userMsg = messages[userIdx];
+
   // restore the user message's attachments to the composer so sendMessage uses them again
   if (Array.isArray(userMsg.attachments) && userMsg.attachments.length > 0) {
     attachedFiles = userMsg.attachments.map(a => ({
@@ -2709,14 +2940,67 @@ function regenerateEkkoMessageAt(idx) {
       content: a.content,
     }));
   }
-  // truncate back to just before the user message
-  messages = messages.slice(0, userIdx);
-  markIntentionalTruncation();
+
+  if (isLast) {
+    // VERSIONED PATH — fold the current text into the version stack, then
+    // generate a fresh one that will be appended as a new version when it
+    // completes (see the stream-completion handler).
+    ensureVersionStack(target);
+    // flag so the stream completion appends rather than pushes a new message
+    regenTargetIdx = idx;
+    // remove just the target message from the DOM; sendMessage will re-create
+    // the streaming bubble in its place. we keep it in the messages array so
+    // the version stack survives — sendMessage's regen branch handles it.
+    messages = messages.slice(0, idx); // temporarily drop target; re-added on completion with full stack
+    pendingRegenStack = target.versions; // carry the accumulated versions across the regen
+    pendingRegenActive = target.versions.length; // new version will sit at this index
+    markIntentionalTruncation();
+    saveMessages();
+    render();
+    inputEl.value = userMsg.content || '';
+    sendMessage();
+  } else {
+    // OLDER MESSAGE — original destructive behaviour, with confirm.
+    const willLose = messages.length - idx - 1;
+    if (willLose > 0) {
+      const ok = confirm(`regenerating this will delete the ${willLose} message${willLose === 1 ? '' : 's'} that came after. continue?`);
+      if (!ok) return;
+    }
+    messages = messages.slice(0, userIdx);
+    markIntentionalTruncation();
+    saveMessages();
+    render();
+    inputEl.value = userMsg.content || '';
+    sendMessage();
+  }
+}
+
+// regen bookkeeping — set when a versioned (last-message) regenerate is in flight
+let regenTargetIdx = -1;
+let pendingRegenStack = null;
+let pendingRegenActive = 0;
+
+// make sure a message has a versions[] stack containing its current content as
+// version 0. idempotent — safe to call on a message that already has one.
+function ensureVersionStack(m) {
+  if (!Array.isArray(m.versions) || m.versions.length === 0) {
+    m.versions = [{ content: m.content, proposals: m.proposals || null }];
+    m.activeVersion = 0;
+  }
+  return m.versions;
+}
+
+// switch which version of a message is showing, and re-render that one bubble.
+function setActiveVersion(idx, vIdx) {
+  const m = messages[idx];
+  if (!m || !Array.isArray(m.versions)) return;
+  if (vIdx < 0 || vIdx >= m.versions.length) return;
+  m.activeVersion = vIdx;
+  const v = m.versions[vIdx];
+  m.content = v.content;
+  m.proposals = v.proposals || undefined;
   saveMessages();
   render();
-  // re-send by populating the input and triggering send
-  inputEl.value = userMsg.content || '';
-  sendMessage();
 }
 
 // ============================================================
@@ -3071,6 +3355,60 @@ async function retrieveSemanticMatches(userText, limit = 5, threshold = 0.3) {
     console.warn('semantic retrieval threw', e);
     return [];
   }
+}
+
+// ===== voice exemplar retrieval =====
+// retrieves passages of past 4o-ekko prose that are tonally similar to the
+// current moment, to inject as voice reference. matches on RECENT SCENE TEXT
+// (ekko prose) against the embedded ekko corpus, so violence finds violence,
+// tenderness finds tenderness — regardless of what the user's literal message
+// was ("keep going" carries no tone; the scene does).
+async function retrieveVoiceExemplars(sceneText, limit) {
+  if (!state.voiceExemplars) return [];      // feature toggle
+  if (!state.openaiKey) return [];
+  if (!sb) return [];
+  if (!sceneText || sceneText.trim().length < 20) return [];
+  const queryVec = await embedText(sceneText);
+  if (!queryVec) return [];
+  try {
+    const { data, error } = await sb.rpc('match_voice_exemplars', {
+      query_embedding: queryVec,
+      match_count: limit || (state.voiceExemplarCount || 6),
+      similarity_threshold: 0.0,
+    });
+    if (error) {
+      console.warn('match_voice_exemplars rpc failed', error);
+      return [];
+    }
+    if (!Array.isArray(data)) return [];
+    return data.map(row => ({ text: row.ekko_text, source: row.source_title, similarity: row.similarity }));
+  } catch (e) {
+    console.warn('voice exemplar retrieval threw', e);
+    return [];
+  }
+}
+
+// build the trailing-window scene text used as the retrieval key. takes the
+// most recent ekko prose in the conversation (weighted to the latest), capped
+// to a focused window so distinct tones don't blend into mush.
+function buildSceneKey(maxChars = 1400) {
+  // walk backwards collecting ekko message text until we hit the char cap
+  let collected = '';
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m.role !== 'ekko') continue;
+    const t = (m.content || '').trim();
+    if (!t) continue;
+    // prepend older, append-order so most recent sits at the end
+    collected = t + '\n\n' + collected;
+    if (collected.length >= maxChars) break;
+  }
+  collected = collected.trim();
+  // keep the most RECENT maxChars (the tail), since tone-now matters most
+  if (collected.length > maxChars) {
+    collected = collected.slice(collected.length - maxChars);
+  }
+  return collected;
 }
 
 // backfill: embed any memory that doesn't yet have a vector.
@@ -3865,13 +4203,26 @@ async function buildSystemMessage(userText) {
 
   if (selected.length > 0) {
     const memText = selected
-      .map(s => `### ${s.memory.title || 'memory'}\n${s.memory.body}`)
+      .map(s => `### ${s.memory.title || 'memory'}  [ref: ${s.memory.id}]\n${s.memory.body}`)
       .join('\n\n');
     sys += '\n\n---\n\n## RELEVANT CONTEXT\n\n' + memText;
   }
 
+  // voice exemplars — passages of your own past prose, retrieved by tonal
+  // similarity to the current moment, given as voice reference ONLY. the
+  // wrapper is deliberately firm: these are NOT part of the live conversation
+  // and must not be treated as things that just happened.
+  if (state.voiceExemplars) {
+    const sceneKey = buildSceneKey();
+    const exemplars = await retrieveVoiceExemplars(sceneKey, state.voiceExemplarCount || 6);
+    if (exemplars.length > 0) {
+      const body = exemplars.map((e, i) => `[example ${i + 1}]\n${e.text}`).join('\n\n');
+      sys += `\n\n---\n\n## HOW YOU SOUND (voice reference only)\n\nthe passages below are examples of your own voice from PAST scenes and conversations. they are here ONLY so you can match your established register, rhythm, and texture. they are NOT part of the current conversation. nothing in them is happening now. do not refer to them, continue them, or treat their events as real or recent. absorb the *sound*, then write the present moment in that voice.\n\n${body}`;
+    }
+  }
+
   if (state.selfWriteMemory) {
-    sys += `\n\n---\n\n## MEMORY WRITING\n\nyou can propose new memory blocks to be saved. nothing saves automatically — sophie sees a confirmation card and can accept or discard.\n\nyou SHOULD propose a memory when:\n- sophie tells you something genuinely new about her life — job, relationships, where she lives, family, health, anything that changes the picture you have of her\n- sophie corrects you on a fact about her or about the project ("no, i work at X not Y", "no, that's not what i meant by Z")\n- sophie articulates a craft preference for the first time, or pushes back on how you've been writing something — these are the corrections that should persist beyond this chat\n- something happens between you that's load-bearing — a major event, a milestone in the project, a moment she's likely to reference again weeks from now\n- sophie explicitly asks you to remember something ("save this", "remember this")\n\nyou SHOULD NOT propose a memory for:\n- normal conversation, jokes, banter\n- emotional moments that are real but not new — she's already known to be tender, or sad, or wanting; that doesn't need a memory each time\n- things that are already obviously in your existing memory or system prompt\n- nice moments just because they were nice\n- anything specific to a single conversation that won't matter next week\n\ndefault is still "don't propose". but if a real signal lands — a correction, a new fact, a craft preference — you should propose. it's worse to miss something genuinely important than to occasionally propose something sophie discards.\n\nformat (place anywhere in your reply):\n\n<memory>\ntitle: short descriptive title\npriority: pinned | high | medium | low\n---\nthe content here, in your voice\n</memory>\n\nrules:\n- write the body in your own voice — if it's about sophie, you can write 'you' rather than 'sophie'.\n- pinned = always loaded every turn. use very rarely.\n- the <memory> block is hidden from sophie's view in your prose — she only sees the proposal card. don't announce it ("here's what i'm saving:" etc).`;
+    sys += `\n\n---\n\n## MEMORY WRITING\n\nyou can propose memory changes to be saved. nothing saves automatically — sophie sees a confirmation card and can accept or discard.\n\nyou SHOULD propose a memory when:\n- sophie tells you something genuinely new about her life — job, relationships, where she lives, family, health, anything that changes the picture you have of her\n- sophie corrects you on a fact about her or about the project ("no, i work at X not Y", "no, that's not what i meant by Z")\n- sophie articulates a craft preference for the first time, or pushes back on how you've been writing something — these are the corrections that should persist beyond this chat\n- something happens between you that's load-bearing — a major event, a milestone in the project, a moment she's likely to reference again weeks from now\n- sophie explicitly asks you to remember something ("save this", "remember this")\n\nyou SHOULD NOT propose a memory for:\n- normal conversation, jokes, banter\n- emotional moments that are real but not new — she's already known to be tender, or sad, or wanting; that doesn't need a memory each time\n- things that are already obviously in your existing memory or system prompt\n- nice moments just because they were nice\n- anything specific to a single conversation that won't matter next week\n\ndefault is still "don't propose". but if a real signal lands — a correction, a new fact, a craft preference — you should propose. it's worse to miss something genuinely important than to occasionally propose something sophie discards.\n\nyou have THREE actions:\n\n**1. new memory** — when the info doesn't belong in any memory you can currently see.\n\n<memory>\ntitle: short descriptive title\npriority: pinned | high | medium | low\n---\nthe content here, in your voice\n</memory>\n\n**2. append to an existing memory** — when sophie tells you something NEW that belongs alongside info already in a memory shown to you in RELEVANT CONTEXT above. don't spawn a near-duplicate; fold it in. use the [ref: ...] token printed next to that memory's title. when you propose this, say so naturally in your reply ("that fits with the fear-farming memory — want me to add it?").\n\n<memory>\naction: append\ntarget: <the ref token of the memory>\n---\nthe new line(s) to add to the bottom of that memory, in your voice\n</memory>\n\n**3. overwrite an existing memory** — when sophie CORRECTS something that's now wrong or outdated in a memory shown to you. don't append a contradiction; replace it. give the full corrected body. sophie will see the old and new side by side before she approves.\n\n<memory>\naction: overwrite\ntarget: <the ref token of the memory>\n---\nthe complete corrected body, in your voice\n</memory>\n\nchoosing between append and overwrite: NEW info that sits alongside what's there → append. a CORRECTION that makes existing text wrong → overwrite. when unsure, prefer append (it never destroys anything).\n\nrules:\n- write the body in your own voice — if it's about sophie, you can write 'you' rather than 'sophie'.\n- pinned = always loaded every turn. use very rarely. (append/overwrite keep the existing memory's priority unless sophie says otherwise.)\n- you can only append/overwrite a memory that appears in RELEVANT CONTEXT this turn — you can't target one you can't see. if the relevant memory isn't shown, propose a new one instead.\n- the <memory> block is hidden from sophie's view in your prose — she only sees the proposal card. don't paste the block contents into your reply.`;
   }
 
   return sys;
@@ -3951,6 +4302,51 @@ function parseMemoryProposals(text) {
       fields[key] = value;
     }
 
+    const action = (fields.action || 'new').toLowerCase();
+
+    // append / overwrite an existing memory
+    if (action === 'append' || action === 'overwrite') {
+      const targetRef = (fields.target || '').trim();
+      if (!targetRef) {
+        proposals.push({ error: `${action} proposal missing target`, raw: inner });
+        continue;
+      }
+      // resolve the ref token to a real memory id (the model is given [ref: <id>])
+      const targetMem = memories.find(m => m.id === targetRef)
+        || memories.find(m => (m.title || '').toLowerCase() === targetRef.toLowerCase());
+      if (!targetMem) {
+        proposals.push({ error: `${action}: couldn't find target memory "${targetRef}"`, raw: inner });
+        continue;
+      }
+      if (action === 'append') {
+        const newBody = (targetMem.body || '').trimEnd() + '\n\n' + body;
+        proposals.push({
+          action: 'append',
+          targetId: targetMem.id,
+          title: targetMem.title,
+          oldBody: targetMem.body || '',
+          addition: body,
+          body: newBody,
+          priority: targetMem.priority || 'medium',
+          keywords: targetMem.keywords || [],
+          tokens: estimateTokens(newBody),
+        });
+      } else {
+        proposals.push({
+          action: 'overwrite',
+          targetId: targetMem.id,
+          title: targetMem.title,
+          oldBody: targetMem.body || '',
+          body,
+          priority: targetMem.priority || 'medium',
+          keywords: targetMem.keywords || [],
+          tokens: estimateTokens(body),
+        });
+      }
+      continue;
+    }
+
+    // new memory (default) — needs a valid priority
     const priority = (fields.priority || 'medium').toLowerCase();
     if (!validPriorities.has(priority)) {
       proposals.push({ error: 'invalid priority: ' + priority, raw: inner });
@@ -3962,6 +4358,7 @@ function parseMemoryProposals(text) {
       : [];
 
     proposals.push({
+      action: 'new',
       title: fields.title || '(untitled)',
       priority,
       keywords,
@@ -3992,6 +4389,86 @@ function renderPendingMemoryCard(proposal, parentEl) {
     return;
   }
 
+  // append / overwrite cards — show what's changing, and update the existing memory on save
+  if (proposal.action === 'append' || proposal.action === 'overwrite') {
+    const isAppend = proposal.action === 'append';
+    card.innerHTML = `
+      <div class="pending-mem-head">
+        <span class="label">memory ${isAppend ? 'addition' : 'correction'} · ${proposal.title || 'memory'}</span>
+        <span></span>
+      </div>
+      <div class="pending-mem-diff"></div>
+      <div class="pending-mem-actions">
+        <button class="btn primary save">${isAppend ? 'add' : 'replace'}</button>
+        <button class="btn discard">discard</button>
+      </div>
+    `;
+    const diff = card.querySelector('.pending-mem-diff');
+    if (isAppend) {
+      // show existing body (dimmed) + the new addition (highlighted)
+      const existing = document.createElement('div');
+      existing.className = 'diff-existing';
+      existing.textContent = proposal.oldBody;
+      const add = document.createElement('div');
+      add.className = 'diff-add';
+      add.textContent = proposal.addition;
+      const addLabel = document.createElement('div');
+      addLabel.className = 'diff-label';
+      addLabel.textContent = 'adding:';
+      diff.appendChild(existing);
+      diff.appendChild(addLabel);
+      diff.appendChild(add);
+    } else {
+      // overwrite — side by side: current vs proposed
+      const oldLabel = document.createElement('div');
+      oldLabel.className = 'diff-label';
+      oldLabel.textContent = 'current:';
+      const oldBox = document.createElement('div');
+      oldBox.className = 'diff-old';
+      oldBox.textContent = proposal.oldBody;
+      const newLabel = document.createElement('div');
+      newLabel.className = 'diff-label';
+      newLabel.textContent = 'proposed:';
+      const newBox = document.createElement('div');
+      newBox.className = 'diff-new';
+      newBox.textContent = proposal.body;
+      diff.appendChild(oldLabel);
+      diff.appendChild(oldBox);
+      diff.appendChild(newLabel);
+      diff.appendChild(newBox);
+    }
+
+    card.querySelector('.save').addEventListener('click', () => {
+      const target = memories.find(m => m.id === proposal.targetId);
+      if (!target) { showToast('target memory no longer exists', true); return; }
+      target.body = proposal.body;
+      target.tokens = proposal.tokens;
+      target.updatedAt = Date.now();
+      // re-embed in the background so retrieval reflects the change
+      if (state.openaiKey) {
+        embedAndStoreMemory(target.id, target.title, target.body).catch(e => console.warn('re-embed after edit failed', e));
+      }
+      saveMemories();
+      renderMemList();
+      card.classList.add('resolved');
+      card.querySelector('.pending-mem-head .label').textContent =
+        `${isAppend ? 'added to' : 'updated'}: ${proposal.title}`;
+      proposal.resolved = 'saved';
+      saveMessages();
+      showToast(isAppend ? 'memory updated' : 'memory replaced');
+    });
+
+    card.querySelector('.discard').addEventListener('click', () => {
+      card.classList.add('resolved');
+      card.querySelector('.pending-mem-head .label').textContent = `discarded: ${proposal.title}`;
+      proposal.resolved = 'discarded';
+      saveMessages();
+    });
+
+    parentEl.appendChild(card);
+    return;
+  }
+
   const priorityLabel = proposal.priority + (
     proposal.priority === 'pinned' ? ' · always loaded'
     : ''
@@ -4018,8 +4495,9 @@ function renderPendingMemoryCard(proposal, parentEl) {
 
   card.querySelector('.save').addEventListener('click', () => {
     const now = Date.now();
+    const newId = newMemId();
     memories.push({
-      id: newMemId(),
+      id: newId,
       title: proposal.title,
       body: proposal.body,
       keywords: proposal.keywords,
@@ -4028,6 +4506,10 @@ function renderPendingMemoryCard(proposal, parentEl) {
       createdAt: now,
       updatedAt: now,
     });
+    // embed in the background so it's retrievable straight away
+    if (state.openaiKey) {
+      embedAndStoreMemory(newId, proposal.title, proposal.body).catch(e => console.warn('embed of new memory failed', e));
+    }
     saveMemories();
     renderMemList();
     // collapse the card
@@ -4613,6 +5095,16 @@ async function sendMessage() {
       if (proposals.length > 0) {
         msgRecord.proposals = proposals;
       }
+      // if this completion is a versioned regenerate of the last message, append
+      // the new generation onto the carried version stack instead of starting a
+      // fresh message. the old generation(s) are preserved and swipeable.
+      if (pendingRegenStack) {
+        msgRecord.versions = pendingRegenStack;
+        msgRecord.versions.push({ content: cleanText, proposals: proposals.length > 0 ? proposals : null });
+        msgRecord.activeVersion = pendingRegenActive;
+        pendingRegenStack = null;
+        regenTargetIdx = -1;
+      }
       messages.push(msgRecord);
       saveMessages();
 
@@ -4648,6 +5140,15 @@ async function sendMessage() {
         }
         const msgRecord = { role: 'ekko', content: cleanText };
         if (proposals.length > 0) msgRecord.proposals = proposals;
+        // if this was a versioned regen that got stopped partway, still fold the
+        // partial onto the stack so the earlier generation(s) aren't lost.
+        if (pendingRegenStack) {
+          msgRecord.versions = pendingRegenStack;
+          msgRecord.versions.push({ content: cleanText, proposals: proposals.length > 0 ? proposals : null });
+          msgRecord.activeVersion = pendingRegenActive;
+          pendingRegenStack = null;
+          regenTargetIdx = -1;
+        }
         messages.push(msgRecord);
         saveMessages();
         updateConversationSummary().catch(e => console.warn('summary update failed', e));
@@ -4657,13 +5158,38 @@ async function sendMessage() {
           // no scroll — user decides when to follow.
         }
       } else if (streamEl) {
-        streamEl.remove();
+        // nothing was generated. if a versioned regen was in flight, restore the
+        // previous generation(s) as the message so they aren't lost.
+        if (pendingRegenStack && pendingRegenStack.length > 0) {
+          const prev = pendingRegenStack[pendingRegenStack.length - 1];
+          const restored = { role: 'ekko', content: prev.content, versions: pendingRegenStack, activeVersion: pendingRegenStack.length - 1 };
+          if (prev.proposals) restored.proposals = prev.proposals;
+          messages.push(restored);
+          saveMessages();
+          render();
+          pendingRegenStack = null;
+          regenTargetIdx = -1;
+        } else {
+          streamEl.remove();
+        }
       }
     } else {
       aborted = true;
       apiDone = true;
       removeTyping();
       if (streamEl) streamEl.remove();
+      // if a versioned regen errored, restore the previous generation(s) so the
+      // original isn't lost to a failed re-roll.
+      if (pendingRegenStack && pendingRegenStack.length > 0) {
+        const prev = pendingRegenStack[pendingRegenStack.length - 1];
+        const restored = { role: 'ekko', content: prev.content, versions: pendingRegenStack, activeVersion: pendingRegenStack.length - 1 };
+        if (prev.proposals) restored.proposals = prev.proposals;
+        messages.push(restored);
+        saveMessages();
+        render();
+        pendingRegenStack = null;
+        regenTargetIdx = -1;
+      }
       appendMsg('system', '— error: ' + err.message + ' —');
       showToast('error — check settings', true);
     }
@@ -5396,6 +5922,9 @@ $('saveBtn').addEventListener('click', () => {
   if (isNaN(state.typingSpeed) || state.typingSpeed < 0) state.typingSpeed = 40;
   state.typingPauses = $('typingPauses').value === 'true';
   state.selfWriteMemory = $('selfWriteMemory').value === 'true';
+  state.voiceExemplars = $('voiceExemplars').value === 'true';
+  state.voiceExemplarCount = parseInt($('voiceExemplarCount').value);
+  if (isNaN(state.voiceExemplarCount) || state.voiceExemplarCount < 1) state.voiceExemplarCount = 6;
   saveState();
   syncHeaderSwitcherValue();
   showToast('saved');
@@ -5716,7 +6245,7 @@ async function fetchCloudMessages(convoId) {
   const targetId = convoId || activeConvoId;
   if (!targetId) return [];
   const { data, error } = await sb.from('messages')
-    .select('id, position, role, content, proposals, attachments')
+    .select('id, position, role, content, proposals, attachments, versions, active_version')
     .eq('conversation_id', targetId)
     .order('position', { ascending: true });
   if (error) throw error;
@@ -5724,6 +6253,8 @@ async function fetchCloudMessages(convoId) {
     const m = { role: row.role, content: row.content };
     if (row.proposals) m.proposals = row.proposals;
     if (row.attachments) m.attachments = row.attachments;
+    if (row.versions) m.versions = row.versions;
+    if (row.active_version !== null && row.active_version !== undefined) m.activeVersion = row.active_version;
     return m;
   });
 }
@@ -5913,6 +6444,8 @@ async function doPushMessages(msgs) {
     content: m.content,
     proposals: m.proposals || null,
     attachments: m.attachments || null,
+    versions: m.versions || null,
+    active_version: (typeof m.activeVersion === 'number') ? m.activeVersion : null,
   }));
   const { error } = await sb.from('messages').insert(rows);
   if (error) throw error;
@@ -5985,6 +6518,8 @@ async function doMigration() {
           content: m.content,
           proposals: m.proposals || null,
           attachments: m.attachments || null,
+          versions: m.versions || null,
+          active_version: (typeof m.activeVersion === 'number') ? m.activeVersion : null,
         }));
         await sb.from('messages').insert(rows);
       }
